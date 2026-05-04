@@ -10,12 +10,13 @@ from typing import Any
 import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ServiceNotFound
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_HVAC_MODE,
     CONF_INDOOR_TEMP_ENTITY,
     CONF_INNER_INTERVAL,
     CONF_LATITUDE,
@@ -38,6 +39,7 @@ from .const import (
     CONF_SUPPLY_TEMP_ENTITY,
     CONF_TARGET_TEMPERATURE,
     CONF_WEATHER_ENTITY,
+    DEFAULT_HVAC_MODE,
     DEFAULT_OUTPUT_MAX,
     DEFAULT_OUTPUT_MIN,
     DEFAULT_PID_KD,
@@ -58,6 +60,7 @@ from .const import (
     STATUS_DEGRADED,
     STATUS_FAULT,
     STATUS_OK,
+    STATUS_STARTING,
 )
 from .pid import SimplePID
 from .rc_mpc import compute_supply_setpoint
@@ -80,6 +83,7 @@ class OuterData:
     status: str
     smhi_available: bool
     open_meteo_available: bool
+    controller_action: str = "unknown"
 
 
 @dataclass
@@ -155,12 +159,19 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         )
 
         # --- Overall status ---
-        if outdoor_source == OUTDOOR_SOURCE_UNAVAILABLE:
+        if self.hass.state != CoreState.running:
+            status = STATUS_STARTING
+        elif outdoor_source == OUTDOOR_SOURCE_UNAVAILABLE:
             status = STATUS_FAULT
         elif faults:
             status = STATUS_DEGRADED
         else:
             status = STATUS_OK
+
+        hvac_mode = self._entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
+        controller_action = self._compute_controller_action(
+            hvac_mode, status, supply_setpoint, predicted_indoor, target_temp, indoor_temp, faults
+        )
 
         return OuterData(
             supply_setpoint=supply_setpoint,
@@ -173,7 +184,57 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             status=status,
             smhi_available=smhi_available,
             open_meteo_available=open_meteo_available,
+            controller_action=controller_action,
         )
+
+    def _compute_controller_action(
+        self,
+        hvac_mode: str,
+        status: str,
+        supply_setpoint: float,
+        predicted_indoor: float | None,
+        target_temp: float,
+        indoor_temp: float | None,
+        faults: list[str],
+    ) -> str:
+        if hvac_mode == "off":
+            return "Heating off"
+        if status == STATUS_STARTING:
+            return "Starting"
+        if "mpc_skipped_no_outdoor" in faults:
+            return "Fault: no outdoor temperature"
+
+        supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
+        horizon = int(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+        at_min = supply_setpoint <= supply_min + 0.5
+        at_max = supply_setpoint >= supply_max - 0.5
+
+        if predicted_indoor is None:
+            if at_max:
+                return "Maximum heating"
+            if at_min:
+                return "Minimum heating"
+            return "Active"
+
+        pred_err = predicted_indoor - target_temp
+        horizon_str = f"in {horizon}h"
+
+        if at_max:
+            if pred_err < -0.5:
+                return f"Maximum heating — predicted {predicted_indoor:.1f}°C {horizon_str}"
+            return "Maximum heating applied"
+
+        if at_min:
+            if pred_err > 0.5:
+                return f"House predicted to overheat — heating turned off"
+            return f"Maintaining {target_temp:.1f}°C — heating turned off"
+
+        if pred_err < -0.5:
+            return f"Heating to {target_temp:.1f}°C — predicted {predicted_indoor:.1f}°C {horizon_str}"
+        if pred_err > 0.5:
+            return f"Reducing heat — predicted {predicted_indoor:.1f}°C {horizon_str}"
+        return f"Maintaining {target_temp:.1f}°C"
 
     def _resolve_outdoor_temp(self, faults: list[str]) -> tuple[float | None, str]:
         """Try each configured outdoor sensor in order, then SMHI, then last known."""

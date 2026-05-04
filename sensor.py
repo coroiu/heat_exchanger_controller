@@ -24,6 +24,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             StatusSensor(entry, runtime),
+            ControllerActionSensor(entry, runtime.outer),
             SupplySetpointSensor(entry, runtime.outer),
             PredictedIndoorTempSensor(entry, runtime.outer),
             OutdoorTempSourceSensor(entry, runtime.outer),
@@ -87,6 +88,20 @@ class StatusSensor(_OuterSensor):
             attrs["dry_run"] = inner.dry_run
 
         return attrs
+
+
+class ControllerActionSensor(_OuterSensor):
+    _attr_translation_key = "controller_action"
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_controller_action"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.controller_action
 
 
 class SupplySetpointSensor(_OuterSensor):

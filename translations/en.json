@@ -55,9 +55,11 @@
         "state": {
           "ok": "OK",
           "degraded": "Degraded",
-          "fault": "Fault"
+          "fault": "Fault",
+          "starting": "Starting"
         }
       },
+      "controller_action": { "name": "Controller action" },
       "supply_temp_setpoint": { "name": "Supply temp setpoint" },
       "predicted_indoor_temp": { "name": "Predicted indoor temp" },
       "outdoor_temp_source": { "name": "Outdoor temp source" },
