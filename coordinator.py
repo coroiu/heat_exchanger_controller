@@ -446,15 +446,17 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             if self._outer.data is not None
             else float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
         )
+        # Limits are negated because the PID output is negated before writing
+        # (the heat exchanger has an inverse transfer function: a warmer fake
+        # outdoor temp produces a lower supply temperature).
+        out_min = float(self._opt(CONF_OUTPUT_MIN, DEFAULT_OUTPUT_MIN))
+        out_max = float(self._opt(CONF_OUTPUT_MAX, DEFAULT_OUTPUT_MAX))
         return SimplePID(
             kp=float(self._opt(CONF_PID_KP, DEFAULT_PID_KP)),
             ki=float(self._opt(CONF_PID_KI, DEFAULT_PID_KI)),
             kd=float(self._opt(CONF_PID_KD, DEFAULT_PID_KD)),
             setpoint=supply_setpoint,
-            output_limits=(
-                float(self._opt(CONF_OUTPUT_MIN, DEFAULT_OUTPUT_MIN)),
-                float(self._opt(CONF_OUTPUT_MAX, DEFAULT_OUTPUT_MAX)),
-            ),
+            output_limits=(-out_max, -out_min),
         )
 
     def _get_sensor_value(self, entity_id: str) -> float | None:
@@ -494,7 +496,9 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             potentiometer_value = self._last_potentiometer
             inner_mode = "open_loop"
         else:
-            potentiometer_value = self._pid(supply_temp, dt)
+            # Negate: supply_temp too low → error positive → raw PID positive
+            # → negate → colder fake outdoor temp → more heat → supply rises.
+            potentiometer_value = -self._pid(supply_temp, dt)
             self._last_potentiometer = potentiometer_value
             inner_mode = "pid"
 
