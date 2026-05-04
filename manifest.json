@@ -1,0 +1,11 @@
+{
+  "domain": "heat_exchanger_controller",
+  "name": "Heat Exchanger Controller",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "version": "1.0.0"
+}

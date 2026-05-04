@@ -1,0 +1,241 @@
+"""Sensor entities for Heat Exchanger Controller."""
+
+from __future__ import annotations
+
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfIrradiance, UnitOfTemperature
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import HeatExchangerRuntimeData
+from .climate import _device_info
+from .const import DOMAIN
+from .coordinator import InnerCoordinator, OuterCoordinator
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    runtime: HeatExchangerRuntimeData = entry.runtime_data
+    async_add_entities(
+        [
+            StatusSensor(entry, runtime),
+            SupplySetpointSensor(entry, runtime.outer),
+            PredictedIndoorTempSensor(entry, runtime.outer),
+            OutdoorTempSourceSensor(entry, runtime.outer),
+            SolarIrradianceSensor(entry, runtime.outer),
+            IndoorTempUsedSensor(entry, runtime.outer),
+            OutdoorTempUsedSensor(entry, runtime.outer),
+            SupplyTempActualSensor(entry, runtime.inner),
+            PotentiometerOutputSensor(entry, runtime.inner),
+        ]
+    )
+
+
+class _OuterSensor(CoordinatorEntity[OuterCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_device_info = _device_info(entry)
+
+
+class _InnerSensor(CoordinatorEntity[InnerCoordinator], SensorEntity):
+    _attr_has_entity_name = True
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_device_info = _device_info(entry)
+
+
+class StatusSensor(_OuterSensor):
+    _attr_translation_key = "status"
+
+    def __init__(self, entry: ConfigEntry, runtime: HeatExchangerRuntimeData) -> None:
+        super().__init__(entry, runtime.outer)
+        self._runtime = runtime
+        self._attr_unique_id = f"{entry.entry_id}_status"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.status
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        outer = self.coordinator.data
+        inner = self._runtime.inner.data
+        attrs: dict = {}
+
+        if outer is not None:
+            attrs["active_faults"] = outer.faults
+            attrs["smhi_available"] = outer.smhi_available
+            attrs["open_meteo_available"] = outer.open_meteo_available
+            attrs["outdoor_temp_source"] = outer.outdoor_temp_source
+            attrs["indoor_temp_assumed"] = outer.indoor_temp is None
+
+        if inner is not None:
+            attrs["inner_loop_mode"] = inner.inner_mode
+            attrs["supply_temp_available"] = not inner.supply_fault
+            attrs["dry_run"] = inner.dry_run
+
+        return attrs
+
+
+class SupplySetpointSensor(_OuterSensor):
+    _attr_translation_key = "supply_temp_setpoint"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_supply_temp_setpoint"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return round(self.coordinator.data.supply_setpoint, 2)
+
+
+class PredictedIndoorTempSensor(_OuterSensor):
+    _attr_translation_key = "predicted_indoor_temp"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_predicted_indoor_temp"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.predicted_indoor_temp
+        return round(v, 2) if v is not None else None
+
+
+class OutdoorTempSourceSensor(_OuterSensor):
+    _attr_translation_key = "outdoor_temp_source"
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_outdoor_temp_source"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.outdoor_temp_source
+
+
+class SolarIrradianceSensor(_OuterSensor):
+    _attr_translation_key = "solar_irradiance"
+    _attr_device_class = SensorDeviceClass.IRRADIANCE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfIrradiance.WATTS_PER_SQUARE_METER
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_solar_irradiance"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.solar_irradiance
+        return round(v, 1) if v is not None else None
+
+
+class IndoorTempUsedSensor(_OuterSensor):
+    """Indoor temperature actually used by the MPC (None → assumed = setpoint)."""
+
+    _attr_translation_key = "indoor_temp_used"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_indoor_temp_used"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.indoor_temp
+        return round(v, 2) if v is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {"assumed": self.coordinator.data.indoor_temp is None}
+
+
+class OutdoorTempUsedSensor(_OuterSensor):
+    """Outdoor temperature actually used by the MPC (after fallback resolution)."""
+
+    _attr_translation_key = "outdoor_temp_used"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_outdoor_temp_used"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.current_outdoor_temp
+        return round(v, 2) if v is not None else None
+
+
+class SupplyTempActualSensor(_InnerSensor):
+    """Actual supply line temperature read by the inner loop."""
+
+    _attr_translation_key = "supply_temp_actual"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_supply_temp_actual"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.current_supply_temp
+        return round(v, 2) if v is not None else None
+
+
+class PotentiometerOutputSensor(_InnerSensor):
+    """Current value being written to the potentiometer (fake outdoor temp)."""
+
+    _attr_translation_key = "potentiometer_output"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_potentiometer_output"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return round(self.coordinator.data.potentiometer_value, 2)

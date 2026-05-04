@@ -1,0 +1,93 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Heat Exchanger Controller",
+        "data": {
+          "name": "Name",
+          "indoor_temp_entity": "Indoor temperature sensor",
+          "outdoor_temp_entities": "Outdoor temperature sensors (priority order)",
+          "supply_temp_entity": "Supply line temperature sensor",
+          "output_service": "Output service (e.g. rest_command.set_heat_exchanger_temp)",
+          "output_value_key": "Output service value parameter (e.g. temp)",
+          "weather_entity": "SMHI weather entity"
+        },
+        "data_description": {
+          "outdoor_temp_entities": "Select sensors in priority order. The first available reading is used. SMHI current observation is the final fallback.",
+          "output_service": "Full service ID in domain.service format.",
+          "output_value_key": "Name of the parameter that receives the temperature value."
+        }
+      }
+    },
+    "error": {
+      "no_outdoor_sensors": "Select at least one outdoor temperature sensor."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Parameters",
+        "data": {
+          "rc_r": "Thermal resistance R (°C/W)",
+          "rc_c": "Thermal capacitance C (Wh/°C)",
+          "rc_ua": "Radiator coefficient UA (W/°C)",
+          "rc_g": "Solar aperture g (m²)",
+          "pid_kp": "PID — Kp",
+          "pid_ki": "PID — Ki",
+          "pid_kd": "PID — Kd",
+          "supply_min": "Supply temperature minimum (°C)",
+          "supply_max": "Supply temperature maximum (°C)",
+          "output_min": "Potentiometer output minimum (°C)",
+          "output_max": "Potentiometer output maximum (°C)",
+          "prediction_horizon": "Prediction horizon (hours)",
+          "outer_interval": "Outer loop interval (minutes)",
+          "inner_interval": "Inner loop interval (seconds)",
+          "climate_min_temp": "Climate entity minimum temperature (°C)",
+          "climate_max_temp": "Climate entity maximum temperature (°C)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "fault": "Fault"
+        }
+      },
+      "supply_temp_setpoint": { "name": "Supply temp setpoint" },
+      "predicted_indoor_temp": { "name": "Predicted indoor temp" },
+      "outdoor_temp_source": { "name": "Outdoor temp source" },
+      "solar_irradiance": { "name": "Solar irradiance" },
+      "indoor_temp_used": { "name": "Indoor temp (used)" },
+      "outdoor_temp_used": { "name": "Outdoor temp (used)" },
+      "supply_temp_actual": { "name": "Supply temp (actual)" },
+      "potentiometer_output": { "name": "Potentiometer output" }
+    },
+    "number": {
+      "rc_r": { "name": "Thermal resistance (R)" },
+      "rc_c": { "name": "Thermal capacitance (C)" },
+      "rc_ua": { "name": "Radiator coefficient (UA)" },
+      "rc_g": { "name": "Solar aperture (g)" },
+      "pid_kp": { "name": "PID Kp" },
+      "pid_ki": { "name": "PID Ki" },
+      "pid_kd": { "name": "PID Kd" },
+      "supply_min": { "name": "Supply temp minimum" },
+      "supply_max": { "name": "Supply temp maximum" },
+      "output_min": { "name": "Potentiometer minimum" },
+      "output_max": { "name": "Potentiometer maximum" },
+      "prediction_horizon": { "name": "Prediction horizon" },
+      "outer_interval": { "name": "Outer loop interval" },
+      "inner_interval": { "name": "Inner loop interval" }
+    },
+    "climate": {
+      "heat_exchanger_climate": { "name": "Heat Exchanger" }
+    },
+    "switch": {
+      "dry_run": { "name": "Dry run" }
+    }
+  }
+}

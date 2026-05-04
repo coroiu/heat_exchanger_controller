@@ -1,0 +1,91 @@
+"""Constants for Heat Exchanger Controller."""
+
+from homeassistant.const import Platform
+
+DOMAIN = "heat_exchanger_controller"
+
+PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.NUMBER, Platform.SWITCH]
+
+# --- Setup (stored in entry.data) ---
+CONF_NAME = "name"
+CONF_INDOOR_TEMP_ENTITY = "indoor_temp_entity"
+CONF_OUTDOOR_TEMP_ENTITIES = "outdoor_temp_entities"
+CONF_SUPPLY_TEMP_ENTITY = "supply_temp_entity"
+CONF_OUTPUT_SERVICE = "output_service"
+CONF_OUTPUT_VALUE_KEY = "output_value_key"
+CONF_WEATHER_ENTITY = "weather_entity"
+CONF_LATITUDE = "latitude"
+CONF_LONGITUDE = "longitude"
+
+# --- Options (stored in entry.options) ---
+CONF_RC_R = "rc_r"
+CONF_RC_C = "rc_c"
+CONF_RC_UA = "rc_ua"
+CONF_RC_G = "rc_g"
+CONF_PID_KP = "pid_kp"
+CONF_PID_KI = "pid_ki"
+CONF_PID_KD = "pid_kd"
+CONF_SUPPLY_MIN = "supply_min"
+CONF_SUPPLY_MAX = "supply_max"
+CONF_OUTPUT_MIN = "output_min"
+CONF_OUTPUT_MAX = "output_max"
+CONF_PREDICTION_HORIZON = "prediction_horizon"
+CONF_OUTER_INTERVAL = "outer_interval"
+CONF_INNER_INTERVAL = "inner_interval"
+CONF_CLIMATE_MIN_TEMP = "climate_min_temp"
+CONF_CLIMATE_MAX_TEMP = "climate_max_temp"
+
+# --- Climate state + switch state (stored in entry.options, no reload on change) ---
+CONF_TARGET_TEMPERATURE = "target_temperature"
+CONF_HVAC_MODE = "hvac_mode"
+CONF_DRY_RUN = "dry_run"
+
+# Keys that trigger a full reload when changed in options
+RELOAD_ON_CHANGE_KEYS = {
+    CONF_RC_R, CONF_RC_C, CONF_RC_UA, CONF_RC_G,
+    CONF_PID_KP, CONF_PID_KI, CONF_PID_KD,
+    CONF_SUPPLY_MIN, CONF_SUPPLY_MAX,
+    CONF_OUTPUT_MIN, CONF_OUTPUT_MAX,
+    CONF_PREDICTION_HORIZON,
+    CONF_OUTER_INTERVAL, CONF_INNER_INTERVAL,
+    CONF_CLIMATE_MIN_TEMP, CONF_CLIMATE_MAX_TEMP,
+}
+
+# --- Defaults ---
+DEFAULT_RC_R = 0.05
+DEFAULT_RC_C = 500.0
+DEFAULT_RC_UA = 20.0
+DEFAULT_RC_G = 5.0
+DEFAULT_PID_KP = 1.0
+DEFAULT_PID_KI = 0.1
+DEFAULT_PID_KD = 0.0
+DEFAULT_SUPPLY_MIN = 20.0
+DEFAULT_SUPPLY_MAX = 70.0
+DEFAULT_OUTPUT_MIN = -30.0
+DEFAULT_OUTPUT_MAX = 30.0
+DEFAULT_PREDICTION_HORIZON = 2
+DEFAULT_OUTER_INTERVAL = 5
+DEFAULT_INNER_INTERVAL = 30
+DEFAULT_CLIMATE_MIN_TEMP = 15.0
+DEFAULT_CLIMATE_MAX_TEMP = 28.0
+DEFAULT_TARGET_TEMPERATURE = 21.0
+DEFAULT_HVAC_MODE = "heat"
+DEFAULT_DRY_RUN = True
+
+# --- Status ---
+STATUS_OK = "ok"
+STATUS_DEGRADED = "degraded"
+STATUS_FAULT = "fault"
+
+# --- Open-Meteo ---
+OPEN_METEO_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude={lat}&longitude={lon}"
+    "&hourly=shortwave_radiation"
+    "&timezone=auto"
+    "&forecast_days=2"
+)
+
+# --- Outdoor source labels ---
+OUTDOOR_SOURCE_LAST_KNOWN = "last_known"
+OUTDOOR_SOURCE_UNAVAILABLE = "unavailable"
