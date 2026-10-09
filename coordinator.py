@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -13,16 +14,22 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ServiceNotFound
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_DISTURBANCE_ALPHA,
+    CONF_DISTURBANCE_ESTIMATE,
     CONF_HVAC_MODE,
     CONF_INDOOR_TEMP_ENTITY,
     CONF_INNER_INTERVAL,
     CONF_LATITUDE,
     CONF_LONGITUDE,
+    CONF_BOOST_TRIGGER_SPAN,
+    CONF_MIN_PUMP_ON_DURATION,
     CONF_OUTDOOR_TEMP_ENTITIES,
     CONF_OUTPUT_MIN,
+    CONF_OUTPUT_READBACK_ENTITY,
     CONF_OUTPUT_MAX,
     CONF_OUTPUT_SERVICE,
     CONF_OUTPUT_VALUE_KEY,
@@ -30,6 +37,7 @@ from .const import (
     CONF_PID_KI,
     CONF_PID_KP,
     CONF_PREDICTION_HORIZON,
+    CONF_PUMP_OFF_THRESHOLD,
     CONF_RC_C,
     CONF_RC_G,
     CONF_RC_R,
@@ -39,13 +47,18 @@ from .const import (
     CONF_SUPPLY_TEMP_ENTITY,
     CONF_TARGET_TEMPERATURE,
     CONF_WEATHER_ENTITY,
+    DEFAULT_BOOST_TRIGGER_SPAN,
+    DEFAULT_DISTURBANCE_ALPHA,
+    DEFAULT_DISTURBANCE_ESTIMATE,
     DEFAULT_HVAC_MODE,
+    DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTPUT_MAX,
     DEFAULT_OUTPUT_MIN,
     DEFAULT_PID_KD,
     DEFAULT_PID_KI,
     DEFAULT_PID_KP,
     DEFAULT_PREDICTION_HORIZON,
+    DEFAULT_PUMP_OFF_THRESHOLD,
     DEFAULT_RC_C,
     DEFAULT_RC_G,
     DEFAULT_RC_R,
@@ -67,8 +80,13 @@ from .rc_mpc import compute_supply_setpoint
 
 _LOGGER = logging.getLogger(__name__)
 
-# Cache Open-Meteo data for 45 minutes to avoid hammering the free API
-_OPEN_METEO_CACHE_SECONDS = 2700
+# Cache Open-Meteo data for 15 minutes
+_OPEN_METEO_CACHE_SECONDS = 900
+
+# Maximum disturbance correction (°C) — hard cap regardless of alpha setting
+_DISTURBANCE_MAX = 5.0
+# Observer state is written at most this often; HA flushes pending writes on shutdown
+_STATE_SAVE_DELAY = 60
 
 
 @dataclass
@@ -84,6 +102,8 @@ class OuterData:
     smhi_available: bool
     open_meteo_available: bool
     controller_action: str = "unknown"
+    smhi_forecast: list[float] = field(default_factory=list)
+    disturbance_estimate: float = 0.0
 
 
 @dataclass
@@ -93,6 +113,12 @@ class InnerData:
     inner_mode: str  # "pid" or "open_loop"
     current_supply_temp: float | None
     dry_run: bool
+    pump_state: str  # "on" or "off"
+    pump_protection_active: bool
+    pid_error: float | None = None
+    pid_p_term: float | None = None
+    pid_i_term: float | None = None
+    pid_d_term: float | None = None
 
 
 class OuterCoordinator(DataUpdateCoordinator[OuterData]):
@@ -113,8 +139,28 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._entry = entry
         self._last_supply_setpoint: float = entry.options.get(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN)
         self._last_outdoor_temp: float | None = None
-        self._open_meteo_cache: list[float] | None = None
+        self._open_meteo_cache: tuple[list[str], list[float]] | None = None
         self._open_meteo_cache_time: datetime | None = None
+        self._d_hat: float = float(entry.options.get(CONF_DISTURBANCE_ESTIMATE, DEFAULT_DISTURBANCE_ESTIMATE))
+        self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
+        self._inner: "InnerCoordinator | None" = None  # set by __init__.py after both are created
+
+    async def async_load_state(self) -> None:
+        """Restore d_hat persisted by the previous run (falls back to the options value)."""
+        stored = await self._store.async_load()
+        if stored and "d_hat" in stored:
+            self._d_hat = float(stored["d_hat"])
+
+    def set_disturbance_estimate(self, value: float) -> None:
+        self._d_hat = max(-_DISTURBANCE_MAX, min(_DISTURBANCE_MAX, value))
+        self._save_state()
+
+    def _save_state(self) -> None:
+        self._store.async_delay_save(lambda: {"d_hat": self._d_hat}, _STATE_SAVE_DELAY)
+
+    async def async_flush_state(self) -> None:
+        """Write d_hat immediately so a reload picks up the latest value."""
+        await self._store.async_save({"d_hat": self._d_hat})
 
     def _opt(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, default)
@@ -153,9 +199,39 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         # --- Current solar value (first item of forecast) ---
         solar_now = solar_forecast[0] if solar_forecast else None
 
+        # --- Disturbance observer ---
+        # Accumulate a slow-moving estimate of the gap between model predictions and
+        # reality. Frozen when heating is off or indoor temp is unavailable.
+        hvac_mode = self._entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
+        if hvac_mode == "heat" and indoor_temp is not None:
+            indoor_error = indoor_temp - target_temp  # positive = warm, negative = cold
+            # Anti-windup: when supply setpoint is saturated and the error would push d_hat
+            # further into saturation, freeze the update. Allows recovery once the error reverses.
+            supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+            supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
+            at_min = self._last_supply_setpoint <= supply_min + 0.5
+            at_max = self._last_supply_setpoint >= supply_max - 0.5
+            saturated = (at_min and indoor_error > 0) or (at_max and indoor_error < 0)
+            if not saturated:
+                alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
+                self._d_hat = (
+                    alpha * self._d_hat
+                    + (1.0 - alpha) * (-indoor_error)
+                )
+                self._d_hat = max(-_DISTURBANCE_MAX, min(_DISTURBANCE_MAX, self._d_hat))
+                self._save_state()
+
+        # Solver targets (target + d_hat) so the house actually lands on target
+        effective_target = target_temp + self._d_hat
+
         # --- RC-MPC ---
         supply_setpoint, predicted_indoor = self._run_mpc(
-            t_in, target_temp, outdoor_temp, smhi_outdoor_forecast, solar_forecast, faults
+            t_in, effective_target, outdoor_temp, smhi_outdoor_forecast, solar_forecast, faults
+        )
+
+        # Shift prediction back to "expected actual" space by removing the model bias
+        predicted_corrected = (
+            (predicted_indoor - self._d_hat) if predicted_indoor is not None else None
         )
 
         # --- Overall status ---
@@ -168,14 +244,13 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         else:
             status = STATUS_OK
 
-        hvac_mode = self._entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
         controller_action = self._compute_controller_action(
-            hvac_mode, status, supply_setpoint, predicted_indoor, target_temp, indoor_temp, faults
+            hvac_mode, status, supply_setpoint, predicted_corrected, target_temp, indoor_temp, faults
         )
 
         return OuterData(
             supply_setpoint=supply_setpoint,
-            predicted_indoor_temp=predicted_indoor,
+            predicted_indoor_temp=predicted_corrected,
             outdoor_temp_source=outdoor_source,
             solar_irradiance=solar_now,
             indoor_temp=indoor_temp,
@@ -185,6 +260,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             smhi_available=smhi_available,
             open_meteo_available=open_meteo_available,
             controller_action=controller_action,
+            smhi_forecast=smhi_outdoor_forecast,
+            disturbance_estimate=self._d_hat,
         )
 
     def _compute_controller_action(
@@ -203,6 +280,14 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             return "Starting"
         if "mpc_skipped_no_outdoor" in faults:
             return "Fault: no outdoor temperature"
+        if (
+            self._inner is not None
+            and self._inner.data is not None
+            and self._inner.data.pump_state == "boosting"
+        ):
+            horizon = int(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+            pred_str = f"{predicted_indoor:.1f}°C" if predicted_indoor is not None else "unknown"
+            return f"Preventive boost — predicted {pred_str} in {horizon}h"
 
         supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
         supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
@@ -278,7 +363,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         reading the forecast attribute directly from the entity state.
         """
         weather_entity = self._entry.data.get(CONF_WEATHER_ENTITY)
-        horizon = int(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+        horizon = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
 
         if not weather_entity:
             faults.append("smhi_not_configured")
@@ -323,54 +408,53 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self, faults: list[str]
     ) -> tuple[list[float], bool]:
         """Fetch hourly solar irradiance from Open-Meteo, with caching."""
-        horizon = int(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+        horizon = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
         now = datetime.now(timezone.utc)
 
-        # Return cached data if still fresh
+        # Fetch fresh data if cache is stale; otherwise re-use raw arrays
         if (
-            self._open_meteo_cache is not None
-            and self._open_meteo_cache_time is not None
-            and (now - self._open_meteo_cache_time).total_seconds() < _OPEN_METEO_CACHE_SECONDS
+            self._open_meteo_cache is None
+            or self._open_meteo_cache_time is None
+            or (now - self._open_meteo_cache_time).total_seconds() >= _OPEN_METEO_CACHE_SECONDS
         ):
-            return self._open_meteo_cache[:horizon], True
+            lat = self._entry.data.get(CONF_LATITUDE, self.hass.config.latitude)
+            lon = self._entry.data.get(CONF_LONGITUDE, self.hass.config.longitude)
+            url = OPEN_METEO_URL.format(lat=lat, lon=lon)
 
-        lat = self._entry.data.get(CONF_LATITUDE, self.hass.config.latitude)
-        lon = self._entry.data.get(CONF_LONGITUDE, self.hass.config.longitude)
-        url = OPEN_METEO_URL.format(lat=lat, lon=lon)
-
-        try:
-            session = async_get_clientsession(self.hass)
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-
-            times: list[str] = data["hourly"]["time"]
-            radiation: list[float] = data["hourly"]["shortwave_radiation"]
-
-            # Find current hour index
-            current_hour = now.strftime("%Y-%m-%dT%H:00")
             try:
-                idx = times.index(current_hour)
-            except ValueError:
-                # Use closest future time
-                idx = 0
-                for i, t in enumerate(times):
-                    if t >= current_hour:
-                        idx = i
-                        break
+                session = async_get_clientsession(self.hass)
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
 
-            solar_slice = radiation[idx: idx + horizon]
-            while len(solar_slice) < horizon:
-                solar_slice.append(0.0)
+                times: list[str] = data["hourly"]["time"]
+                radiation: list[float] = data["hourly"]["shortwave_radiation"]
+                self._open_meteo_cache = (times, radiation)
+                self._open_meteo_cache_time = now
 
-            self._open_meteo_cache = solar_slice
-            self._open_meteo_cache_time = now
-            return solar_slice, True
+            except Exception as err:
+                _LOGGER.debug("Open-Meteo unavailable: %s", err)
+                faults.append("open_meteo_unavailable")
+                return [0.0] * horizon, False
 
-        except Exception as err:
-            _LOGGER.debug("Open-Meteo unavailable: %s", err)
-            faults.append("open_meteo_unavailable")
-            return [0.0] * horizon, False
+        times, radiation = self._open_meteo_cache
+
+        # Slice from the current UTC hour — times are UTC because URL uses timezone=UTC
+        current_hour = now.strftime("%Y-%m-%dT%H:00")
+        try:
+            idx = times.index(current_hour)
+        except ValueError:
+            idx = 0
+            for i, t in enumerate(times):
+                if t >= current_hour:
+                    idx = i
+                    break
+
+        solar_slice = radiation[idx: idx + horizon]
+        while len(solar_slice) < horizon:
+            solar_slice.append(0.0)
+
+        return solar_slice, True
 
     def _run_mpc(
         self,
@@ -394,18 +478,42 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         UA = float(self._opt(CONF_RC_UA, DEFAULT_RC_UA))
         g = float(self._opt(CONF_RC_G, DEFAULT_RC_G))
 
+        # Determine model step size and number of steps
+        # Sub-hourly horizons use a single step of dt = horizon; ≥1 h uses integer hourly steps
+        horizon_h = float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+        if horizon_h < 1.0:
+            dt_hours = horizon_h
+            model_outdoor = smhi_forecast[:1] or [outdoor_temp]
+            model_solar = solar_forecast[:1] or [0.0]
+        else:
+            dt_hours = 1.0
+            n_steps = max(1, round(horizon_h))
+            fallback_t = smhi_forecast[-1] if smhi_forecast else outdoor_temp
+            fallback_s = solar_forecast[-1] if solar_forecast else 0.0
+            model_outdoor = (smhi_forecast + [fallback_t] * n_steps)[:n_steps]
+            model_solar = (solar_forecast + [fallback_s] * n_steps)[:n_steps]
+
+        # When pump is off, no heat is delivered — simulate with T_indoor as effective supply
+        pump_off = (
+            self._inner is not None
+            and self._inner.data is not None
+            and self._inner.data.pump_state == "off"
+        )
+
         try:
             setpoint, predicted = compute_supply_setpoint(
                 t_in=t_in,
                 t_setpoint=target_temp,
-                outdoor_temps=smhi_forecast,
-                solar_irradiance=solar_forecast,
+                outdoor_temps=model_outdoor,
+                solar_irradiance=model_solar,
                 R=R,
                 C=C,
                 UA=UA,
                 g=g,
                 supply_min=supply_min,
                 supply_max=supply_max,
+                prediction_supply=t_in if pump_off else None,
+                dt_hours=dt_hours,
             )
             self._last_supply_setpoint = setpoint
             return setpoint, predicted
@@ -433,9 +541,61 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
         )
         self._entry = entry
         self._outer = outer
-        self._last_potentiometer: float = entry.options.get(CONF_OUTPUT_MIN, DEFAULT_OUTPUT_MIN)
+        self._last_potentiometer: float = float(entry.options.get(CONF_OUTPUT_MAX, DEFAULT_OUTPUT_MAX))
+        self._has_valid_output: bool = False
         self._last_update: datetime | None = None
         self._pid = self._build_pid()
+        self._prev_dry_run: bool = self._dry_run()
+        self._pump_state: str = "on"
+        self._pump_on_since: datetime = datetime.now(timezone.utc)
+        self._boost_active: bool = False
+        self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.inner")
+        # Last written potentiometer value from the previous run (fallback when no
+        # readback sensor is available)
+        self._restored_potentiometer: float | None = None
+        self._last_written: float | None = None
+        # Preload the PID integrator on the next valid cycle (bumpless start).
+        # Set at startup and when dry run is turned off.
+        self._preload_pending: bool = True
+
+    async def async_load_state(self) -> None:
+        """Restore the last written potentiometer value so a restart doesn't jump."""
+        stored = await self._store.async_load()
+        if not stored or "potentiometer" not in stored:
+            return
+        value = float(stored["potentiometer"])
+        self._restored_potentiometer = value
+        self._last_potentiometer = value
+        self._last_written = value
+
+    def _read_potentiometer(self) -> float | None:
+        """Actual potentiometer value from the readback sensor, if configured."""
+        entity = self._entry.data.get(CONF_OUTPUT_READBACK_ENTITY)
+        return self._get_sensor_value(entity) if entity else None
+
+    def _preload_pid(self, supply_temp: float, allow_stored: bool) -> None:
+        """Seed the PID so its output continues from the current potentiometer value."""
+        value = self._read_potentiometer()
+        source = "readback"
+        if value is None and allow_stored:
+            value, source = self._restored_potentiometer, "stored"
+        self._restored_potentiometer = None
+        if value is None:
+            return
+        # Negated to match the PID's sign convention (see _async_update_data)
+        self._pid.preload(-value, supply_temp)
+        threshold = float(self._opt(CONF_PUMP_OFF_THRESHOLD, DEFAULT_PUMP_OFF_THRESHOLD))
+        if value > threshold:
+            # Pump is already off — don't let pump protection force it back on
+            self._pump_state = "off"
+        _LOGGER.info("PID preloaded from %s potentiometer value %.2f", source, value)
+
+    def _save_state(self) -> None:
+        self._store.async_delay_save(lambda: {"potentiometer": self._last_written}, _STATE_SAVE_DELAY)
+
+    async def async_flush_state(self) -> None:
+        if self._last_written is not None:
+            await self._store.async_save({"potentiometer": self._last_written})
 
     def _opt(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, default)
@@ -479,32 +639,64 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
         dt = (now - self._last_update).total_seconds() if self._last_update else float(self._opt(CONF_INNER_INTERVAL, 30))
         self._last_update = now
 
-        # Get supply setpoint from outer coordinator
-        supply_setpoint = (
-            self._outer.data.supply_setpoint
-            if self._outer.data is not None
-            else float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
-        )
-        self._pid.setpoint = supply_setpoint
+        dry_run_now = self._dry_run()
+        if self._prev_dry_run and not dry_run_now:
+            self._pid.reset()
+            # Continue from the real potentiometer value if a readback sensor exists;
+            # otherwise this stays a plain reset (stored value is stale after dry run)
+            self._preload_pending = True
+            self._restored_potentiometer = None
+            _LOGGER.info("Dry run disabled — PID integral reset")
+        self._prev_dry_run = dry_run_now
+
+        # Get supply setpoint from outer coordinator; use SUPPLY_MIN when off so
+        # the PID naturally drives the potentiometer to OUTPUT_MAX (pump off).
+        supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        if self._hvac_is_off():
+            self._pid.setpoint = supply_min
+        else:
+            self._pid.setpoint = (
+                self._outer.data.supply_setpoint
+                if self._outer.data is not None
+                else supply_min
+            )
 
         # Read supply line temp
         supply_entity = self._entry.data.get(CONF_SUPPLY_TEMP_ENTITY)
         supply_temp = self._get_sensor_value(supply_entity) if supply_entity else None
         supply_fault = supply_temp is None
 
+        pid_error: float | None = None
+        pid_p: float | None = None
+        pid_i: float | None = None
+        pid_d: float | None = None
+        pump_protection_active = False
+
         if supply_fault:
             potentiometer_value = self._last_potentiometer
             inner_mode = "open_loop"
         else:
+            if self._preload_pending:
+                self._preload_pid(supply_temp, allow_stored=True)
+                self._preload_pending = False
             # Negate: supply_temp too low → error positive → raw PID positive
             # → negate → colder fake outdoor temp → more heat → supply rises.
             potentiometer_value = -self._pid(supply_temp, dt)
-            self._last_potentiometer = potentiometer_value
             inner_mode = "pid"
+            pid_error = self._pid.last_error
+            pid_p = self._pid.last_p
+            pid_i = self._pid.last_i
+            pid_d = self._pid.last_d
+            self._maybe_trigger_boost()
+            potentiometer_value, pump_protection_active = self._apply_pump_protection(potentiometer_value, now)
+            self._last_potentiometer = potentiometer_value
+            self._has_valid_output = True
 
-        # Write to potentiometer (skip if off or dry run)
-        if not self._hvac_is_off() and not self._dry_run():
+        # Write to potentiometer (skip during dry run or before first valid reading)
+        if not self._dry_run() and self._has_valid_output:
             await self._write_output(potentiometer_value)
+            self._last_written = potentiometer_value
+            self._save_state()
 
         return InnerData(
             potentiometer_value=potentiometer_value,
@@ -512,7 +704,70 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             inner_mode=inner_mode,
             current_supply_temp=supply_temp,
             dry_run=self._dry_run(),
+            pump_state=self._pump_state,
+            pump_protection_active=pump_protection_active,
+            pid_error=pid_error,
+            pid_p_term=pid_p,
+            pid_i_term=pid_i,
+            pid_d_term=pid_d,
         )
+
+    def _maybe_trigger_boost(self) -> None:
+        """Set _boost_active if the outer prediction shows the house cooling below target."""
+        if self._boost_active or self._pump_state != "off" or self._hvac_is_off():
+            return
+        outer_data = self._outer.data
+        if outer_data is None or outer_data.predicted_indoor_temp is None:
+            return
+        target = float(self._opt(CONF_TARGET_TEMPERATURE, DEFAULT_TARGET_TEMPERATURE))
+        span = float(self._opt(CONF_BOOST_TRIGGER_SPAN, DEFAULT_BOOST_TRIGGER_SPAN))
+        if outer_data.predicted_indoor_temp < target - span:
+            self._boost_active = True
+            _LOGGER.info(
+                "Preventive boost triggered: predicted %.1f°C < %.1f°C",
+                outer_data.predicted_indoor_temp,
+                target - span,
+            )
+
+    def _apply_pump_protection(self, output: float, now: datetime) -> tuple[float, bool]:
+        """Cap output to keep the pump on until it has run long enough.
+
+        The heat exchanger turns off its circulation pump when the fake outdoor
+        temp exceeds pump_off_threshold. Before allowing that, we require the
+        pump to have run for at least min_pump_on_duration minutes so that
+        trapped heat near the exchanger has time to radiate away (which would
+        otherwise distort the supply sensor reading).
+        """
+        threshold = float(self._opt(CONF_PUMP_OFF_THRESHOLD, DEFAULT_PUMP_OFF_THRESHOLD))
+        min_on_secs = float(self._opt(CONF_MIN_PUMP_ON_DURATION, DEFAULT_MIN_PUMP_ON_DURATION)) * 60
+
+        if output <= threshold:
+            # PID naturally wants pump on
+            if self._pump_state == "off":
+                self._pump_on_since = now
+            self._pump_state = "on"
+            self._boost_active = False
+            return output, False
+
+        # PID wants pump off
+        if self._pump_state == "off":
+            if self._boost_active:
+                # Predictive boost: force pump on for min_pump_on_duration
+                self._pump_state = "boosting"
+                self._pump_on_since = now
+            else:
+                return output, False  # already off, no cap
+
+        # Pump is on or boosting — check if minimum run time has elapsed
+        run_secs = (now - self._pump_on_since).total_seconds()
+        if run_secs >= min_on_secs:
+            self._boost_active = False
+            self._pump_state = "off"
+            return output, False
+
+        # Cap potentiometer to keep pump running
+        # pump_protection_active only True for normal on→off protection, not during a boost
+        return threshold, self._pump_state == "on"
 
     async def _write_output(self, value: float) -> None:
         output_service: str = self._entry.data.get(CONF_OUTPUT_SERVICE, "")

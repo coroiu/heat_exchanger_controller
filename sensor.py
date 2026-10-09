@@ -24,7 +24,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             StatusSensor(entry, runtime),
-            ControllerActionSensor(entry, runtime.outer),
+            ControllerActionSensor(entry, runtime.outer, runtime.inner),
             SupplySetpointSensor(entry, runtime.outer),
             PredictedIndoorTempSensor(entry, runtime.outer),
             OutdoorTempSourceSensor(entry, runtime.outer),
@@ -33,6 +33,12 @@ async def async_setup_entry(
             OutdoorTempUsedSensor(entry, runtime.outer),
             SupplyTempActualSensor(entry, runtime.inner),
             PotentiometerOutputSensor(entry, runtime.inner),
+            PidErrorSensor(entry, runtime.inner),
+            PidPTermSensor(entry, runtime.inner),
+            PidITermSensor(entry, runtime.inner),
+            PidDTermSensor(entry, runtime.inner),
+            PumpStateSensor(entry, runtime.inner),
+            SmhiForecastSensor(entry, runtime.outer),
         ]
     )
 
@@ -93,15 +99,23 @@ class StatusSensor(_OuterSensor):
 class ControllerActionSensor(_OuterSensor):
     _attr_translation_key = "controller_action"
 
-    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator, inner: InnerCoordinator) -> None:
         super().__init__(entry, coordinator)
+        self._inner = inner
         self._attr_unique_id = f"{entry.entry_id}_controller_action"
 
     @property
     def native_value(self) -> str | None:
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.controller_action
+        action = self.coordinator.data.controller_action
+        inner = self._inner.data
+        if inner is not None:
+            if inner.pump_protection_active:
+                action += " (pump held on)"
+            elif inner.pump_state == "off":
+                action += " (pump off)"
+        return action
 
 
 class SupplySetpointSensor(_OuterSensor):
@@ -254,3 +268,131 @@ class PotentiometerOutputSensor(_InnerSensor):
         if self.coordinator.data is None:
             return None
         return round(self.coordinator.data.potentiometer_value, 2)
+
+
+class PidErrorSensor(_InnerSensor):
+    """Supply temperature tracking error (setpoint − actual)."""
+
+    _attr_translation_key = "pid_error"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pid_error"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.pid_error
+        return round(v, 3) if v is not None else None
+
+
+class PidPTermSensor(_InnerSensor):
+    """PID proportional term (Kp × error)."""
+
+    _attr_translation_key = "pid_p_term"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pid_p_term"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.pid_p_term
+        return round(v, 3) if v is not None else None
+
+
+class PidITermSensor(_InnerSensor):
+    """PID integral term (Ki × accumulated error)."""
+
+    _attr_translation_key = "pid_i_term"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pid_i_term"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.pid_i_term
+        return round(v, 3) if v is not None else None
+
+
+class PidDTermSensor(_InnerSensor):
+    """PID derivative term (Kd × rate of error change)."""
+
+    _attr_translation_key = "pid_d_term"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pid_d_term"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self.coordinator.data.pid_d_term
+        return round(v, 3) if v is not None else None
+
+
+class SmhiForecastSensor(_OuterSensor):
+    """Hourly outdoor temperature forecast fed to the RC-MPC."""
+
+    _attr_translation_key = "smhi_forecast"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_smhi_forecast"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        fc = self.coordinator.data.smhi_forecast
+        return round(fc[0], 1) if fc else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        fc = self.coordinator.data.smhi_forecast
+        return {
+            "forecast": [round(t, 1) for t in fc],
+            "smhi_available": self.coordinator.data.smhi_available,
+        }
+
+
+class PumpStateSensor(_InnerSensor):
+    """Inferred circulation pump state based on potentiometer output vs threshold."""
+
+    _attr_translation_key = "pump_state"
+
+    def __init__(self, entry: ConfigEntry, coordinator: InnerCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_pump_state"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.pump_state
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {"protection_active": self.coordinator.data.pump_protection_active}

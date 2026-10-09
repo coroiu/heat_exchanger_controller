@@ -1,0 +1,267 @@
+title: Heating
+type: custom:horizontal-layout
+layout:
+  max_cols: 1
+  max_width: 600
+badges: []
+cards:
+  - type: custom:mushroom-climate-card
+    entity: climate.predictive_heat_exchanger_heat_exchanger
+    show_temperature_control: true
+    hvac_modes:
+      - heat
+      - cool
+      - "off"
+    fill_container: false
+    name: District heating
+    tap_action:
+      action: more-info
+    icon: mdi:heat-wave
+
+  - type: custom:mushroom-climate-card
+    entity: climate.bathroom_thermostat
+    show_temperature_control: true
+    hvac_modes: []
+    fill_container: false
+    name: Bathroom floor heating
+    tap_action:
+      action: more-info
+    icon: mdi:heat-wave
+
+  - type: horizontal-stack
+    cards:
+      - type: custom:mushroom-template-card
+        primary: >-
+          {% set s = states('sensor.predictive_heat_exchanger_status') %}
+          {{ {'ok': 'OK', 'degraded': 'Degraded', 'fault': 'Fault',
+              'starting': 'Starting'}.get(s, s | title) }}
+        secondary: >-
+          {% set faults = state_attr('sensor.predictive_heat_exchanger_status', 'active_faults') %}
+          {% if faults and faults | length > 0 %}
+            {{ faults | join(', ') }}
+          {% else %}
+            No active faults
+          {% endif %}
+        icon: >-
+          {% set s = states('sensor.predictive_heat_exchanger_status') %}
+          {{ {'ok': 'mdi:check-circle', 'degraded': 'mdi:alert-circle',
+              'fault': 'mdi:alert-octagon', 'starting': 'mdi:timer-sand'
+             }.get(s, 'mdi:help-circle') }}
+        icon_color: >-
+          {% set s = states('sensor.predictive_heat_exchanger_status') %}
+          {{ {'ok': 'green', 'degraded': 'orange', 'fault': 'red',
+              'starting': 'blue'}.get(s, 'grey') }}
+        entity: sensor.predictive_heat_exchanger_status
+        tap_action:
+          action: more-info
+        multiline_secondary: true
+      - type: tile
+        entity: switch.predictive_heat_exchanger_dry_run
+        name: Dry run
+        tap_action:
+          action: toggle
+        color: deep-orange
+
+  - type: custom:mushroom-template-card
+    icon: mdi:information
+    icon_color: deep-orange
+    primary: Dry run active
+    secondary: >-
+      All calculations run but the potentiometer is not written.
+      Turn off dry run to go live.
+    multiline_secondary: true
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+    double_tap_action:
+      action: none
+    visibility:
+      - condition: state
+        entity: switch.predictive_heat_exchanger_dry_run
+        state: "on"
+
+  - type: tile
+    entity: input_boolean.ventilation_fan_automatic_control_enable
+    name: Automatic ventilation control
+    tap_action:
+      action: toggle
+
+  - type: custom:mushroom-light-card
+    entity: light.inverted_ventilation_fan
+    name: Ventilation fan
+    tap_action:
+      action: more-info
+    show_brightness_control: true
+    visibility:
+      - condition: state
+        entity: input_boolean.ventilation_fan_automatic_control_enable
+        state: "off"
+
+  - type: custom:mushroom-light-card
+    entity: light.inverted_ventilation_fan
+    name: Ventilation fan
+    tap_action:
+      action: more-info
+    show_brightness_control: false
+    visibility:
+      - condition: state
+        entity: input_boolean.ventilation_fan_automatic_control_enable
+        state: "on"
+
+  - type: custom:mini-graph-card
+    icon: mdi:thermometer
+    name: Indoor temperature
+    show:
+      average: true
+      extrema: true
+      labels: true
+      fill: false
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.predictive_heat_exchanger_indoor_temp_used
+        name: MPC input
+        color: var(--grey-color)
+        show_fill: false
+      - entity: sensor.predictive_heat_exchanger_predicted_indoor_temp
+        name: Predicted
+        color: var(--warning-color)
+        show_fill: false
+      - entity: sensor.sonoff_sensor_03_temperature
+        name: Bed room
+        color: var(--error-color)
+      - entity: sensor.sonoff_sensor_07_temperature
+        name: Living room
+        color: var(--info-color)
+      - entity: sensor.sonoff_sensor_05_temperature
+        name: Baby room
+        color: var(--success-color)
+
+  - type: custom:mini-graph-card
+    icon: mdi:thermometer-lines
+    name: Supply temperature
+    show:
+      average: true
+      extrema: true
+      labels: true
+      fill: false
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.predictive_heat_exchanger_supply_temp_setpoint
+        name: Setpoint (MPC)
+        color: var(--warning-color)
+        show_fill: false
+      - entity: sensor.predictive_heat_exchanger_supply_temp_actual
+        name: Actual
+        color: var(--info-color)
+        show_fill: false
+      - entity: sensor.sonoff_sensor_06_temperature
+        name: Radiator supply
+        color: var(--success-color)
+        show_fill: false
+
+  - type: custom:mini-graph-card
+    icon: mdi:thermometer
+    name: Potentiometer output
+    show:
+      average: true
+      extrema: true
+      labels: true
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.predictive_heat_exchanger_potentiometer_output
+        name: Fake outdoor temp
+      - entity: input_number.zero
+        name: Zero
+        color: "#FFFFFF22"
+        show_fill: false
+        fixed_value: true
+        show_state: false
+        show_indicator: false
+        show_legend: false
+        show_points: false
+    color_thresholds:
+      - value: -30
+        color: var(--blue-color)
+      - value: -0.5
+        color: var(--blue-color)
+      - value: 0.5
+        color: var(--green-color)
+      - value: 20
+        color: var(--green-color)
+      - value: 25
+        color: var(--red-color)
+
+  - type: custom:mini-graph-card
+    icon: mdi:thermometer
+    name: Outdoor temperature
+    show:
+      average: true
+      extrema: true
+      labels: true
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.predictive_heat_exchanger_outdoor_temp_used
+        name: MPC input
+        color: var(--grey-color)
+        show_fill: true
+      - entity: sensor.aqara_sensor_03_temperature
+        name: Aqara
+        color: var(--success-color)
+        show_fill: false
+      - entity: sensor.ngenic_controller_temperature
+        name: Ngenic
+        color: var(--warning-color)
+        show_fill: false
+      - entity: sensor.smhi_outdoor_temperature
+        name: SMHI
+        color: var(--error-color)
+        show_fill: false
+
+  - type: custom:mini-graph-card
+    icon: mdi:weather-sunny
+    name: Solar irradiance
+    show:
+      average: true
+      extrema: true
+      labels: true
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.predictive_heat_exchanger_solar_irradiance
+        name: W/m²
+        color: var(--warning-color)
+        show_fill: true
+
+  - type: custom:mini-graph-card
+    icon: mdi:water-percent
+    name: Indoor humidity
+    show:
+      average: true
+      extrema: true
+      labels: true
+    hours_to_show: 24
+    points_per_hour: 24
+    line_width: 3
+    height: 250
+    entities:
+      - entity: sensor.ngenic_sensor_sovrum_humidity
+        name: Bed room
+        color: var(--error-color)
+      - entity: sensor.sonoff_sensor_07_humidity
+        name: Living room
+        color: var(--info-color)

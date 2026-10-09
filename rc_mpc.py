@@ -22,6 +22,8 @@ def compute_supply_setpoint(
     g: float,
     supply_min: float,
     supply_max: float,
+    prediction_supply: float | None = None,
+    dt_hours: float = 1.0,
 ) -> tuple[float, float]:
     """Return (supply_setpoint, predicted_t_in_at_horizon).
 
@@ -41,12 +43,12 @@ def compute_supply_setpoint(
     if N == 0:
         return _clamp(t_setpoint, supply_min, supply_max), t_in
 
-    # Per-step coefficients (dt = 1 hour)
-    a = (UA + 1.0 / R) / C
-    b = UA / C
+    # Per-step coefficients scaled by dt
+    a = (UA + 1.0 / R) / C * dt_hours
+    b = UA / C * dt_hours
 
-    # Disturbance per step: contribution from solar gain + outdoor temp
-    d = [(g * solar_irradiance[k] + outdoor_temps[k] / R) / C for k in range(N)]
+    # Disturbance per step: contribution from solar gain + outdoor temp, scaled by dt
+    d = [(g * solar_irradiance[k] + outdoor_temps[k] / R) / C * dt_hours for k in range(N)]
 
     # Protect against degenerate parameters
     if abs(b) < 1e-9 or abs(a) < 1e-9:
@@ -70,7 +72,9 @@ def compute_supply_setpoint(
     t_supply = (t_setpoint - A * t_in - D) / B
     t_supply_clamped = _clamp(t_supply, supply_min, supply_max)
 
-    predicted = _simulate_forward(t_in, outdoor_temps, solar_irradiance, t_supply_clamped, a, b, d)
+    # prediction_supply lets the caller override the simulated supply (e.g. t_in when pump is off)
+    effective_supply = prediction_supply if prediction_supply is not None else t_supply_clamped
+    predicted = _simulate_forward(t_in, outdoor_temps, solar_irradiance, effective_supply, a, b, d)
 
     return t_supply_clamped, predicted
 

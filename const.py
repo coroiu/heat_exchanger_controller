@@ -13,6 +13,7 @@ CONF_OUTDOOR_TEMP_ENTITIES = "outdoor_temp_entities"
 CONF_SUPPLY_TEMP_ENTITY = "supply_temp_entity"
 CONF_OUTPUT_SERVICE = "output_service"
 CONF_OUTPUT_VALUE_KEY = "output_value_key"
+CONF_OUTPUT_READBACK_ENTITY = "output_readback_entity"  # optional: reports the potentiometer's actual value
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_LATITUDE = "latitude"
 CONF_LONGITUDE = "longitude"
@@ -34,6 +35,9 @@ CONF_OUTER_INTERVAL = "outer_interval"
 CONF_INNER_INTERVAL = "inner_interval"
 CONF_CLIMATE_MIN_TEMP = "climate_min_temp"
 CONF_CLIMATE_MAX_TEMP = "climate_max_temp"
+CONF_PUMP_OFF_THRESHOLD = "pump_off_threshold"
+CONF_MIN_PUMP_ON_DURATION = "min_pump_on_duration"
+CONF_BOOST_TRIGGER_SPAN = "boost_trigger_span"
 
 # --- Climate state + switch state (stored in entry.options, no reload on change) ---
 CONF_TARGET_TEMPERATURE = "target_temperature"
@@ -52,6 +56,9 @@ RELOAD_ON_CHANGE_KEYS = {
 }
 
 # --- Defaults ---
+CONF_DISTURBANCE_ALPHA = "disturbance_alpha"
+CONF_DISTURBANCE_ESTIMATE = "disturbance_estimate"
+
 DEFAULT_RC_R = 0.05
 DEFAULT_RC_C = 500.0
 DEFAULT_RC_UA = 20.0
@@ -61,7 +68,7 @@ DEFAULT_PID_KI = 0.1
 DEFAULT_PID_KD = 0.0
 DEFAULT_SUPPLY_MIN = 20.0
 DEFAULT_SUPPLY_MAX = 70.0
-DEFAULT_OUTPUT_MIN = -30.0
+DEFAULT_OUTPUT_MIN = 0.0
 DEFAULT_OUTPUT_MAX = 30.0
 DEFAULT_PREDICTION_HORIZON = 2
 DEFAULT_OUTER_INTERVAL = 5
@@ -71,6 +78,11 @@ DEFAULT_CLIMATE_MAX_TEMP = 28.0
 DEFAULT_TARGET_TEMPERATURE = 21.0
 DEFAULT_HVAC_MODE = "heat"
 DEFAULT_DRY_RUN = True
+DEFAULT_DISTURBANCE_ALPHA = 0.95
+DEFAULT_DISTURBANCE_ESTIMATE = 0.0
+DEFAULT_PUMP_OFF_THRESHOLD = 100.0  # above normal output range → feature disabled by default
+DEFAULT_MIN_PUMP_ON_DURATION = 20  # minutes
+DEFAULT_BOOST_TRIGGER_SPAN = 0.3  # °C below target that triggers a preventive boost
 
 # --- Status ---
 STATUS_OK = "ok"
@@ -83,7 +95,7 @@ OPEN_METEO_URL = (
     "https://api.open-meteo.com/v1/forecast"
     "?latitude={lat}&longitude={lon}"
     "&hourly=shortwave_radiation"
-    "&timezone=auto"
+    "&timezone=UTC"
     "&forecast_days=2"
 )
 

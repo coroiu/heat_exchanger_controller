@@ -10,16 +10,21 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import HeatExchangerRuntimeData
 from .climate import _device_info
 from .const import (
+    CONF_BOOST_TRIGGER_SPAN,
+    CONF_DISTURBANCE_ALPHA,
     CONF_INNER_INTERVAL,
+    CONF_MIN_PUMP_ON_DURATION,
     CONF_OUTER_INTERVAL,
     CONF_PID_KD,
     CONF_PID_KI,
     CONF_PID_KP,
     CONF_PREDICTION_HORIZON,
+    CONF_PUMP_OFF_THRESHOLD,
     CONF_RC_C,
     CONF_RC_G,
     CONF_RC_R,
@@ -28,7 +33,10 @@ from .const import (
     CONF_SUPPLY_MIN,
     CONF_OUTPUT_MIN,
     CONF_OUTPUT_MAX,
+    DEFAULT_BOOST_TRIGGER_SPAN,
+    DEFAULT_DISTURBANCE_ALPHA,
     DEFAULT_INNER_INTERVAL,
+    DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTER_INTERVAL,
     DEFAULT_OUTPUT_MAX,
     DEFAULT_OUTPUT_MIN,
@@ -36,6 +44,7 @@ from .const import (
     DEFAULT_PID_KI,
     DEFAULT_PID_KP,
     DEFAULT_PREDICTION_HORIZON,
+    DEFAULT_PUMP_OFF_THRESHOLD,
     DEFAULT_RC_C,
     DEFAULT_RC_G,
     DEFAULT_RC_R,
@@ -45,6 +54,7 @@ from .const import (
     DOMAIN,
     RELOAD_ON_CHANGE_KEYS,
 )
+from .coordinator import OuterCoordinator
 
 
 @dataclass(frozen=True)
@@ -120,7 +130,7 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
     HeatExchangerNumberDescription(
         key="prediction_horizon", translation_key="prediction_horizon", conf_key=CONF_PREDICTION_HORIZON,
         default=DEFAULT_PREDICTION_HORIZON,
-        native_min_value=1, native_max_value=12, native_step=1,
+        native_min_value=0.5, native_max_value=12, native_step=0.5,
         native_unit_of_measurement=UnitOfTime.HOURS,
         mode=NumberMode.BOX,
     ),
@@ -138,6 +148,35 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.SECONDS,
         mode=NumberMode.BOX,
     ),
+    HeatExchangerNumberDescription(
+        key="pump_off_threshold", translation_key="pump_off_threshold",
+        conf_key=CONF_PUMP_OFF_THRESHOLD, default=DEFAULT_PUMP_OFF_THRESHOLD,
+        native_min_value=-30.0, native_max_value=100.0, native_step=0.5,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="min_pump_on_duration", translation_key="min_pump_on_duration",
+        conf_key=CONF_MIN_PUMP_ON_DURATION, default=DEFAULT_MIN_PUMP_ON_DURATION,
+        native_min_value=1, native_max_value=120, native_step=1,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="disturbance_alpha", translation_key="disturbance_alpha",
+        conf_key=CONF_DISTURBANCE_ALPHA, default=DEFAULT_DISTURBANCE_ALPHA,
+        native_min_value=0.0, native_max_value=0.99, native_step=0.01,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="boost_trigger_span", translation_key="boost_trigger_span",
+        conf_key=CONF_BOOST_TRIGGER_SPAN, default=DEFAULT_BOOST_TRIGGER_SPAN,
+        native_min_value=0.0, native_max_value=5.0, native_step=0.1,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
 )
 
 
@@ -146,8 +185,10 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    runtime: HeatExchangerRuntimeData = entry.runtime_data
     async_add_entities(
         [HeatExchangerNumber(entry, desc) for desc in _NUMBERS]
+        + [DisturbanceEstimateNumber(entry, runtime.outer)]
     )
 
 
@@ -173,3 +214,37 @@ class HeatExchangerNumber(NumberEntity):
         new_options[self.entity_description.conf_key] = value
         self.hass.config_entries.async_update_entry(self._entry, options=new_options)
         self.async_write_ha_state()
+
+
+class DisturbanceEstimateNumber(CoordinatorEntity[OuterCoordinator], NumberEntity):
+    """Live disturbance estimate — readable and writable.
+
+    Shows the current value the observer has converged to. Set it manually to
+    seed the observer (e.g. after restart) or to override it entirely.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "disturbance_estimate"
+    _attr_native_min_value = -5.0
+    _attr_native_max_value = 5.0
+    _attr_native_step = 0.1
+    _attr_mode = NumberMode.BOX
+    _attr_device_class = NumberDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_disturbance_estimate"
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return round(self.coordinator.data.disturbance_estimate, 3)
+
+    async def async_set_native_value(self, value: float) -> None:
+        # Coordinator persists the value so it survives reloads and restarts
+        self.coordinator.set_disturbance_estimate(value)
+        await self.coordinator.async_request_refresh()

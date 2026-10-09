@@ -21,6 +21,7 @@ from .const import (
     CONF_LONGITUDE,
     CONF_NAME,
     CONF_OUTDOOR_TEMP_ENTITIES,
+    CONF_OUTPUT_READBACK_ENTITY,
     CONF_OUTPUT_SERVICE,
     CONF_OUTPUT_VALUE_KEY,
     CONF_OUTPUT_MIN,
@@ -107,6 +108,9 @@ class HeatExchangerConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_OUTPUT_VALUE_KEY,
                     default="temp",
                 ): selector.TextSelector(),
+                vol.Optional(CONF_OUTPUT_READBACK_ENTITY): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
                 vol.Required(CONF_WEATHER_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="weather")
                 ),
@@ -114,6 +118,50 @@ class HeatExchangerConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if not user_input.get(CONF_OUTDOOR_TEMP_ENTITIES):
+                errors[CONF_OUTDOOR_TEMP_ENTITIES] = "no_outdoor_sensors"
+            else:
+                data = dict(entry.data)
+                data.update(user_input)
+                if not user_input.get(CONF_OUTPUT_READBACK_ENTITY):
+                    # Field cleared in the form — drop the old value
+                    data.pop(CONF_OUTPUT_READBACK_ENTITY, None)
+                return self.async_update_reload_and_abort(entry, data=data)
+
+        current = entry.data
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_NAME, default=current.get(CONF_NAME, "Heat Exchanger")): selector.TextSelector(),
+                vol.Required(CONF_INDOOR_TEMP_ENTITY, default=current.get(CONF_INDOOR_TEMP_ENTITY)): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Required(CONF_OUTDOOR_TEMP_ENTITIES, default=current.get(CONF_OUTDOOR_TEMP_ENTITIES, [])): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", multiple=True)
+                ),
+                vol.Required(CONF_SUPPLY_TEMP_ENTITY, default=current.get(CONF_SUPPLY_TEMP_ENTITY)): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Required(CONF_OUTPUT_SERVICE, default=current.get(CONF_OUTPUT_SERVICE, "rest_command.set_heat_exchanger_temp")): selector.TextSelector(),
+                vol.Required(CONF_OUTPUT_VALUE_KEY, default=current.get(CONF_OUTPUT_VALUE_KEY, "temp")): selector.TextSelector(),
+                vol.Optional(
+                    CONF_OUTPUT_READBACK_ENTITY,
+                    description={"suggested_value": current.get(CONF_OUTPUT_READBACK_ENTITY)},
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                vol.Required(CONF_WEATHER_ENTITY, default=current.get(CONF_WEATHER_ENTITY)): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="weather")
+                ),
+            }
+        )
+
+        return self.async_show_form(step_id="reconfigure", data_schema=schema, errors=errors)
 
     @staticmethod
     @callback

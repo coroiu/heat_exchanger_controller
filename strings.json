@@ -1,6 +1,23 @@
 {
   "config": {
     "step": {
+      "reconfigure": {
+        "title": "Reconfigure Heat Exchanger Controller",
+        "data": {
+          "name": "Name",
+          "indoor_temp_entity": "Indoor temperature sensor",
+          "outdoor_temp_entities": "Outdoor temperature sensors (priority order)",
+          "supply_temp_entity": "Supply line temperature sensor",
+          "output_service": "Output service (e.g. rest_command.set_heat_exchanger_temp)",
+          "output_value_key": "Output service value parameter (e.g. temp)",
+          "output_readback_entity": "Potentiometer readback sensor (optional, reports the actual value)"
+        },
+        "data_description": {
+          "outdoor_temp_entities": "Select sensors in priority order. The first available reading is used. SMHI current observation is the final fallback.",
+          "output_service": "Full service ID in domain.service format.",
+          "output_value_key": "Name of the parameter that receives the temperature value."
+        }
+      },
       "user": {
         "title": "Heat Exchanger Controller",
         "data": {
@@ -10,6 +27,7 @@
           "supply_temp_entity": "Supply line temperature sensor",
           "output_service": "Output service (e.g. rest_command.set_heat_exchanger_temp)",
           "output_value_key": "Output service value parameter (e.g. temp)",
+          "output_readback_entity": "Potentiometer readback sensor (optional, reports the actual value)",
           "weather_entity": "SMHI weather entity"
         },
         "data_description": {
@@ -67,7 +85,20 @@
       "indoor_temp_used": { "name": "Indoor temp (used)" },
       "outdoor_temp_used": { "name": "Outdoor temp (used)" },
       "supply_temp_actual": { "name": "Supply temp (actual)" },
-      "potentiometer_output": { "name": "Potentiometer output" }
+      "potentiometer_output": { "name": "Potentiometer output" },
+      "pid_error": { "name": "PID error" },
+      "pid_p_term": { "name": "PID P term" },
+      "pid_i_term": { "name": "PID I term" },
+      "pid_d_term": { "name": "PID D term" },
+      "pump_state": {
+        "name": "Pump state",
+        "state": {
+          "on": "On",
+          "off": "Off",
+          "boosting": "Boosting"
+        }
+      },
+      "smhi_forecast": { "name": "SMHI outdoor forecast" }
     },
     "number": {
       "rc_r": { "name": "Thermal resistance (R)" },
@@ -83,7 +114,12 @@
       "output_max": { "name": "Potentiometer maximum" },
       "prediction_horizon": { "name": "Prediction horizon" },
       "outer_interval": { "name": "Outer loop interval" },
-      "inner_interval": { "name": "Inner loop interval" }
+      "inner_interval": { "name": "Inner loop interval" },
+      "pump_off_threshold": { "name": "Pump-off threshold" },
+      "min_pump_on_duration": { "name": "Min pump-on duration" },
+      "disturbance_alpha": { "name": "Disturbance smoothing (α)" },
+      "disturbance_estimate": { "name": "Disturbance estimate" },
+      "boost_trigger_span": { "name": "Boost trigger span" }
     },
     "climate": {
       "heat_exchanger_climate": { "name": "Heat Exchanger" }

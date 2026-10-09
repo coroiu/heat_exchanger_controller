@@ -44,6 +44,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     inner = InnerCoordinator(
         hass, entry, outer, update_interval=timedelta(seconds=inner_seconds)
     )
+    outer._inner = inner
+    await outer.async_load_state()
+    await inner.async_load_state()
 
     # First refresh — outer coordinator must succeed at least partially.
     # Fault-tolerant: will not raise unless the coordinator itself errors out.
@@ -68,6 +71,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        await entry.runtime_data.outer.async_flush_state()
+        await entry.runtime_data.inner.async_flush_state()
         entry.runtime_data = None
     return unload_ok
 
@@ -94,6 +99,7 @@ async def _async_options_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     if curr_structural == runtime.structural_opts_snapshot:
         # Only climate state keys changed (target_temperature / hvac_mode) — no reload needed
         await runtime.outer.async_request_refresh()
+        await runtime.inner.async_request_refresh()
         return
 
     # Structural params changed — full reload
