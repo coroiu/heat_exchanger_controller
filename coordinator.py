@@ -218,10 +218,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             saturated = (at_min and indoor_error > 0) or (at_max and indoor_error < 0)
             if not saturated:
                 alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
-                self._d_hat = (
-                    alpha * self._d_hat
-                    + (1.0 - alpha) * (-indoor_error)
-                )
+                # Integrate (not low-pass) so any persistent offset keeps growing d_hat until
+                # indoor reaches target; (1 - alpha) is the gain per outer tick.
+                self._d_hat += (1.0 - alpha) * (-indoor_error)
                 self._d_hat = max(-_DISTURBANCE_MAX, min(_DISTURBANCE_MAX, self._d_hat))
                 self._save_state()
 

@@ -166,7 +166,7 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
     HeatExchangerNumberDescription(
         key="disturbance_alpha", translation_key="disturbance_alpha",
         conf_key=CONF_DISTURBANCE_ALPHA, default=DEFAULT_DISTURBANCE_ALPHA,
-        native_min_value=0.0, native_max_value=0.99, native_step=0.01,
+        native_min_value=0.8, native_max_value=0.99, native_step=0.01,
         mode=NumberMode.BOX,
     ),
     HeatExchangerNumberDescription(
