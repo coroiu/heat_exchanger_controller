@@ -104,13 +104,16 @@ class OuterData:
     controller_action: str = "unknown"
     smhi_forecast: list[float] = field(default_factory=list)
     disturbance_estimate: float = 0.0
+    # False until the MPC has produced at least one setpoint (e.g. sensors not yet
+    # loaded right after a restart); supply_setpoint is then only a placeholder
+    setpoint_valid: bool = True
 
 
 @dataclass
 class InnerData:
     potentiometer_value: float
     supply_fault: bool
-    inner_mode: str  # "pid" or "open_loop"
+    inner_mode: str  # "pid", "open_loop" or "awaiting_setpoint"
     current_supply_temp: float | None
     dry_run: bool
     pump_state: str  # "on" or "off"
@@ -138,6 +141,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         )
         self._entry = entry
         self._last_supply_setpoint: float = entry.options.get(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN)
+        self._has_valid_setpoint: bool = False
         self._last_outdoor_temp: float | None = None
         self._open_meteo_cache: tuple[list[str], list[float]] | None = None
         self._open_meteo_cache_time: datetime | None = None
@@ -262,6 +266,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             controller_action=controller_action,
             smhi_forecast=smhi_outdoor_forecast,
             disturbance_estimate=self._d_hat,
+            setpoint_valid=self._has_valid_setpoint,
         )
 
     def _compute_controller_action(
@@ -439,14 +444,16 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
 
         times, radiation = self._open_meteo_cache
 
-        # Slice from the current UTC hour — times are UTC because URL uses timezone=UTC
-        current_hour = now.strftime("%Y-%m-%dT%H:00")
+        # Open-Meteo's shortwave_radiation is the mean over the *preceding* hour, so the
+        # slot labelled HH+1:00 covers the current hour HH–HH+1. Start the slice there so
+        # model step k gets the mean for hour k. Times are UTC because the URL uses timezone=UTC.
+        current_slot = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:00")
         try:
-            idx = times.index(current_hour)
+            idx = times.index(current_slot)
         except ValueError:
             idx = 0
             for i, t in enumerate(times):
-                if t >= current_hour:
+                if t >= current_slot:
                     idx = i
                     break
 
@@ -516,6 +523,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 dt_hours=dt_hours,
             )
             self._last_supply_setpoint = setpoint
+            self._has_valid_setpoint = True
             return setpoint, predicted
         except Exception as err:
             _LOGGER.warning("RC-MPC failed: %s", err)
@@ -651,15 +659,17 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
 
         # Get supply setpoint from outer coordinator; use SUPPLY_MIN when off so
         # the PID naturally drives the potentiometer to OUTPUT_MAX (pump off).
+        # Until the MPC has produced a real setpoint (sensors still loading after a
+        # restart), hold the potentiometer where it is instead of chasing SUPPLY_MIN.
         supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        outer_data = self._outer.data
+        awaiting_setpoint = False
         if self._hvac_is_off():
             self._pid.setpoint = supply_min
+        elif outer_data is None or not outer_data.setpoint_valid:
+            awaiting_setpoint = True
         else:
-            self._pid.setpoint = (
-                self._outer.data.supply_setpoint
-                if self._outer.data is not None
-                else supply_min
-            )
+            self._pid.setpoint = outer_data.supply_setpoint
 
         # Read supply line temp
         supply_entity = self._entry.data.get(CONF_SUPPLY_TEMP_ENTITY)
@@ -672,7 +682,14 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
         pid_d: float | None = None
         pump_protection_active = False
 
-        if supply_fault:
+        if awaiting_setpoint:
+            # No write and no PID step; the preload (if pending) runs on the first real cycle
+            readback = self._read_potentiometer()
+            potentiometer_value = readback if readback is not None else self._last_potentiometer
+            inner_mode = "awaiting_setpoint"
+            # Retry the outer loop now rather than waiting out its full interval
+            await self._outer.async_request_refresh()
+        elif supply_fault:
             potentiometer_value = self._last_potentiometer
             inner_mode = "open_loop"
         else:
@@ -692,8 +709,9 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             self._last_potentiometer = potentiometer_value
             self._has_valid_output = True
 
-        # Write to potentiometer (skip during dry run or before first valid reading)
-        if not self._dry_run() and self._has_valid_output:
+        # Write to potentiometer (skip during dry run, before first valid reading, or
+        # while waiting for the first MPC setpoint)
+        if not self._dry_run() and self._has_valid_output and not awaiting_setpoint:
             await self._write_output(potentiometer_value)
             self._last_written = potentiometer_value
             self._save_state()
