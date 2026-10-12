@@ -51,6 +51,7 @@ from .const import (
     DEFAULT_BOOST_TRIGGER_SPAN,
     DEFAULT_DISTURBANCE_ALPHA,
     DEFAULT_DISTURBANCE_ESTIMATE,
+    DISTURBANCE_MAX,
     DEFAULT_HVAC_MODE,
     DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTPUT_MAX,
@@ -84,8 +85,6 @@ _LOGGER = logging.getLogger(__name__)
 # Cache Open-Meteo data for 15 minutes
 _OPEN_METEO_CACHE_SECONDS = 900
 
-# Maximum disturbance correction (°C) — hard cap regardless of alpha setting
-_DISTURBANCE_MAX = 5.0
 # Indoor trend for the observer's transient freeze is measured over this window
 _INDOOR_TREND_WINDOW = timedelta(minutes=30)
 # Observer state is written at most this often; HA flushes pending writes on shutdown
@@ -157,10 +156,10 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         """Restore d_hat persisted by the previous run (falls back to the options value)."""
         stored = await self._store.async_load()
         if stored and "d_hat" in stored:
-            self._d_hat = float(stored["d_hat"])
+            self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, float(stored["d_hat"])))
 
     def set_disturbance_estimate(self, value: float) -> None:
-        self._d_hat = max(-_DISTURBANCE_MAX, min(_DISTURBANCE_MAX, value))
+        self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, value))
         self._save_state()
 
     def _save_state(self) -> None:
@@ -246,9 +245,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             if not saturated and not recovering:
                 alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
                 # Integrate (not low-pass) so any persistent offset keeps growing d_hat until
-                # indoor reaches target; (1 - alpha) is the gain per outer tick.
+                # indoor reaches target; (1 - alpha) is the gain per outer tick, so alpha = 1 freezes it.
                 self._d_hat += (1.0 - alpha) * (-indoor_error)
-                self._d_hat = max(-_DISTURBANCE_MAX, min(_DISTURBANCE_MAX, self._d_hat))
+                self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, self._d_hat))
                 self._save_state()
 
         # Solver targets (target + d_hat) so the house actually lands on target

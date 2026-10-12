@@ -35,6 +35,7 @@ from .const import (
     CONF_OUTPUT_MAX,
     DEFAULT_BOOST_TRIGGER_SPAN,
     DEFAULT_DISTURBANCE_ALPHA,
+    DISTURBANCE_MAX,
     DEFAULT_INNER_INTERVAL,
     DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTER_INTERVAL,
@@ -166,7 +167,7 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
     HeatExchangerNumberDescription(
         key="disturbance_alpha", translation_key="disturbance_alpha",
         conf_key=CONF_DISTURBANCE_ALPHA, default=DEFAULT_DISTURBANCE_ALPHA,
-        native_min_value=0.8, native_max_value=0.99, native_step=0.01,
+        native_min_value=0.8, native_max_value=1.0, native_step=0.01,
         mode=NumberMode.BOX,
     ),
     HeatExchangerNumberDescription(
@@ -225,8 +226,8 @@ class DisturbanceEstimateNumber(CoordinatorEntity[OuterCoordinator], NumberEntit
 
     _attr_has_entity_name = True
     _attr_translation_key = "disturbance_estimate"
-    _attr_native_min_value = -5.0
-    _attr_native_max_value = 5.0
+    _attr_native_min_value = -DISTURBANCE_MAX
+    _attr_native_max_value = DISTURBANCE_MAX
     _attr_native_step = 0.1
     _attr_mode = NumberMode.BOX
     _attr_device_class = NumberDeviceClass.TEMPERATURE
