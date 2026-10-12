@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -85,6 +86,8 @@ _OPEN_METEO_CACHE_SECONDS = 900
 
 # Maximum disturbance correction (°C) — hard cap regardless of alpha setting
 _DISTURBANCE_MAX = 5.0
+# Indoor trend for the observer's transient freeze is measured over this window
+_INDOOR_TREND_WINDOW = timedelta(minutes=30)
 # Observer state is written at most this often; HA flushes pending writes on shutdown
 _STATE_SAVE_DELAY = 60
 
@@ -146,6 +149,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._open_meteo_cache: tuple[list[str], list[float]] | None = None
         self._open_meteo_cache_time: datetime | None = None
         self._d_hat: float = float(entry.options.get(CONF_DISTURBANCE_ESTIMATE, DEFAULT_DISTURBANCE_ESTIMATE))
+        self._indoor_history: deque[tuple[datetime, float]] = deque()
         self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
         self._inner: "InnerCoordinator | None" = None  # set by __init__.py after both are created
 
@@ -168,6 +172,18 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
 
     def _opt(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, default)
+
+    def _indoor_trend(self, now: datetime, indoor_temp: float) -> float | None:
+        """Record indoor temp and return its slope (°C/h) over the trend window, if available."""
+        self._indoor_history.append((now, indoor_temp))
+        # Keep one sample at or beyond the window edge so the slope spans the full window
+        while len(self._indoor_history) > 1 and now - self._indoor_history[1][0] >= _INDOOR_TREND_WINDOW:
+            self._indoor_history.popleft()
+        oldest_time, oldest_temp = self._indoor_history[0]
+        span_h = (now - oldest_time).total_seconds() / 3600.0
+        if span_h < _INDOOR_TREND_WINDOW.total_seconds() / 3600.0 * 0.66:
+            return None
+        return (indoor_temp - oldest_temp) / span_h
 
     def _get_sensor_value(self, entity_id: str) -> float | None:
         state = self.hass.states.get(entity_id)
@@ -216,7 +232,18 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             at_min = self._last_supply_setpoint <= supply_min + 0.5
             at_max = self._last_supply_setpoint >= supply_max - 0.5
             saturated = (at_min and indoor_error > 0) or (at_max and indoor_error < 0)
-            if not saturated:
+            # Transient freeze: if indoor is already heading toward target fast enough to get
+            # there within the horizon, the error is a recovery in progress, not model bias.
+            # Integrating it winds d_hat up and causes overshoot. A flat or diverging error
+            # still integrates, so persistent offsets are corrected.
+            trend = self._indoor_trend(datetime.now(timezone.utc), indoor_temp)
+            horizon_h = float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+            recovering = (
+                trend is not None
+                and trend * indoor_error < 0
+                and abs(trend) * horizon_h >= abs(indoor_error)
+            )
+            if not saturated and not recovering:
                 alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
                 # Integrate (not low-pass) so any persistent offset keeps growing d_hat until
                 # indoor reaches target; (1 - alpha) is the gain per outer tick.
