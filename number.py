@@ -5,15 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription, NumberMode
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.number import (
+    NumberDeviceClass,
+    NumberEntity,
+    NumberEntityDescription,
+    NumberMode,
+    RestoreNumber,
+)
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import HeatExchangerRuntimeData
-from .climate import _device_info
+from .climate import _device_info, _room_device_info, _room_subentries
 from .const import (
     CONF_BOOST_TRIGGER_SPAN,
     CONF_DISTURBANCE_ALPHA,
@@ -52,8 +58,14 @@ from .const import (
     DEFAULT_RC_UA,
     DEFAULT_SUPPLY_MAX,
     DEFAULT_SUPPLY_MIN,
+    DEFAULT_IMPORTANCE_RAMP_MIN,
+    DEFAULT_ROOM_IMPORTANCE,
+    DEFAULT_ROOM_TARGET,
     DOMAIN,
     RELOAD_ON_CHANGE_KEYS,
+    ROOM_INPUT_IMPORTANCE,
+    ROOM_INPUT_RAMP,
+    ROOM_INPUT_TARGET,
 )
 from .coordinator import OuterCoordinator
 
@@ -181,6 +193,34 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
 )
 
 
+_ROOM_RC_KEYS = (CONF_RC_R, CONF_RC_C, CONF_RC_UA, CONF_RC_G)
+
+# Room state inputs: restored on restart, pushed into the coordinator, never reload
+_ROOM_STATE_NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
+    HeatExchangerNumberDescription(
+        key=ROOM_INPUT_TARGET, translation_key="room_target", conf_key=ROOM_INPUT_TARGET,
+        default=DEFAULT_ROOM_TARGET,
+        native_min_value=10.0, native_max_value=30.0, native_step=0.1,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key=ROOM_INPUT_IMPORTANCE, translation_key="room_importance", conf_key=ROOM_INPUT_IMPORTANCE,
+        default=DEFAULT_ROOM_IMPORTANCE,
+        native_min_value=0.0, native_max_value=1.0, native_step=0.01,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key=ROOM_INPUT_RAMP, translation_key="room_importance_ramp_time", conf_key=ROOM_INPUT_RAMP,
+        default=DEFAULT_IMPORTANCE_RAMP_MIN,
+        native_min_value=0, native_max_value=240, native_step=1,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        mode=NumberMode.BOX,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -191,6 +231,12 @@ async def async_setup_entry(
         [HeatExchangerNumber(entry, desc) for desc in _NUMBERS]
         + [DisturbanceEstimateNumber(entry, runtime.outer)]
     )
+    for sub in _room_subentries(entry):
+        async_add_entities(
+            [RoomRcNumber(entry, sub, desc) for desc in _NUMBERS if desc.conf_key in _ROOM_RC_KEYS]
+            + [RoomStateNumber(entry, sub, runtime.outer, desc) for desc in _ROOM_STATE_NUMBERS],
+            config_subentry_id=sub.subentry_id,
+        )
 
 
 class HeatExchangerNumber(NumberEntity):
@@ -249,3 +295,67 @@ class DisturbanceEstimateNumber(CoordinatorEntity[OuterCoordinator], NumberEntit
         # Coordinator persists the value so it survives reloads and restarts
         self.coordinator.set_disturbance_estimate(value)
         await self.coordinator.async_request_refresh()
+
+
+class RoomRcNumber(NumberEntity):
+    """A room's RC parameter, stored in the room subentry (changing it reloads the entry)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, entry: ConfigEntry, subentry: ConfigSubentry, description: HeatExchangerNumberDescription
+    ) -> None:
+        self.entity_description = description
+        self._entry = entry
+        self._subentry_id = subentry.subentry_id
+        self._attr_unique_id = f"{entry.entry_id}_{subentry.subentry_id}_{description.key}"
+        self._attr_device_info = _room_device_info(entry, subentry)
+
+    @property
+    def native_value(self) -> float:
+        data = self._entry.subentries[self._subentry_id].data
+        return float(data.get(self.entity_description.conf_key, self.entity_description.default))
+
+    async def async_set_native_value(self, value: float) -> None:
+        subentry = self._entry.subentries[self._subentry_id]
+        data = {**subentry.data, self.entity_description.conf_key: value}
+        self.hass.config_entries.async_update_subentry(self._entry, subentry, data=data)
+
+
+class RoomStateNumber(RestoreNumber):
+    """A room's target / importance / ramp time; set by hand or by automations."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        subentry: ConfigSubentry,
+        coordinator: OuterCoordinator,
+        description: HeatExchangerNumberDescription,
+    ) -> None:
+        self.entity_description = description
+        self._coordinator = coordinator
+        self._subentry_id = subentry.subentry_id
+        self._attr_unique_id = f"{entry.entry_id}_{subentry.subentry_id}_{description.key}"
+        self._attr_device_info = _room_device_info(entry, subentry)
+        self._attr_native_value = description.default
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self._attr_native_value = last.native_value
+        self._push()
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        # No refresh: the rooms pick it up on the next outer tick, and an extra tick
+        # would also step the live observer
+        self._push()
+        self.async_write_ha_state()
+
+    def _push(self) -> None:
+        self._coordinator.set_room_input(
+            self._subentry_id, self.entity_description.conf_key, float(self._attr_native_value)
+        )

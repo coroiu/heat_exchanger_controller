@@ -6,7 +6,14 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    OptionsFlow,
+    SubentryFlowResult,
+)
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
@@ -34,6 +41,7 @@ from .const import (
     CONF_RC_G,
     CONF_RC_R,
     CONF_RC_UA,
+    CONF_ROOM_SENSOR,
     CONF_SUPPLY_MAX,
     CONF_SUPPLY_MIN,
     CONF_SUPPLY_TEMP_ENTITY,
@@ -60,6 +68,7 @@ from .const import (
     DEFAULT_SUPPLY_MIN,
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
+    SUBENTRY_TYPE_ROOM,
 )
 
 
@@ -167,6 +176,62 @@ class HeatExchangerConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return HeatExchangerOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {SUBENTRY_TYPE_ROOM: RoomSubentryFlow}
+
+
+class RoomSubentryFlow(ConfigSubentryFlow):
+    """Add or reconfigure a room (shadow mode: own RC model, target and importance)."""
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        if user_input is not None:
+            data = dict(user_input)
+            title = data.pop(CONF_NAME)
+            return self.async_create_entry(title=title, data=data)
+        # Seed the RC params from the house model
+        return self.async_show_form(
+            step_id="user", data_schema=_room_schema(None, self._get_entry().options)
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        subentry = self._get_reconfigure_subentry()
+        if user_input is not None:
+            data = dict(user_input)
+            title = data.pop(CONF_NAME)
+            # The entry's update listener sees the changed data and reloads
+            return self.async_update_and_abort(self._get_entry(), subentry, title=title, data=data)
+        current = {CONF_NAME: subentry.title, **subentry.data}
+        return self.async_show_form(step_id="reconfigure", data_schema=_room_schema(current, current))
+
+
+def _room_schema(current: dict[str, Any] | None, defaults: Any) -> vol.Schema:
+    def num(min_: float, max_: float, step: float) -> selector.NumberSelector:
+        return selector.NumberSelector(
+            selector.NumberSelectorConfig(min=min_, max=max_, step=step, mode=selector.NumberSelectorMode.BOX)
+        )
+
+    current = current or {}
+    return vol.Schema(
+        {
+            vol.Required(CONF_NAME, default=current.get(CONF_NAME, "")): selector.TextSelector(),
+            vol.Required(CONF_ROOM_SENSOR, default=current.get(CONF_ROOM_SENSOR, vol.UNDEFINED)): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+            ),
+            vol.Required(CONF_RC_R, default=defaults.get(CONF_RC_R, DEFAULT_RC_R)): num(0.001, 1.0, 0.001),
+            vol.Required(CONF_RC_UA, default=defaults.get(CONF_RC_UA, DEFAULT_RC_UA)): num(0.1, 500.0, 0.1),
+            vol.Required(CONF_RC_G, default=defaults.get(CONF_RC_G, DEFAULT_RC_G)): num(0.0, 100.0, 0.01),
+            vol.Required(CONF_RC_C, default=defaults.get(CONF_RC_C, DEFAULT_RC_C)): num(10.0, 10000.0, 10.0),
+        }
+    )
 
 
 class HeatExchangerOptionsFlow(OptionsFlow):

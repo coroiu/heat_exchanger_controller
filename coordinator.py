@@ -43,6 +43,7 @@ from .const import (
     CONF_RC_G,
     CONF_RC_R,
     CONF_RC_UA,
+    CONF_ROOM_SENSOR,
     CONF_SUPPLY_MAX,
     CONF_SUPPLY_MIN,
     CONF_SUPPLY_TEMP_ENTITY,
@@ -67,8 +68,13 @@ from .const import (
     DEFAULT_RC_UA,
     DEFAULT_SUPPLY_MAX,
     DEFAULT_SUPPLY_MIN,
+    DEFAULT_IMPORTANCE_RAMP_MIN,
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
+    ROOM_INPUT_IMPORTANCE,
+    ROOM_INPUT_RAMP,
+    ROOM_INPUT_TARGET,
+    SUBENTRY_TYPE_ROOM,
     OPEN_METEO_URL,
     OUTDOOR_SOURCE_LAST_KNOWN,
     OUTDOOR_SOURCE_UNAVAILABLE,
@@ -78,7 +84,8 @@ from .const import (
     STATUS_STARTING,
 )
 from .pid import SimplePID
-from .rc_mpc import compute_supply_setpoint
+from .rc_mpc import compute_supply_setpoint, model_inputs
+from .room_model import SCORE_HORIZON_H, RoomModel, RoomParams, RoomResult, combine
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -109,6 +116,15 @@ class OuterData:
     # False until the MPC has produced at least one setpoint (e.g. sensors not yet
     # loaded right after a restart); supply_setpoint is then only a placeholder
     setpoint_valid: bool = True
+    # --- Rooms (shadow mode; never read by the live control path) ---
+    # subentry_id → result, or None when the room's sensor is unavailable
+    rooms: dict[str, RoomResult | None] = field(default_factory=dict)
+    shadow_supply_setpoint: float | None = None
+    shadow_supply_max: float | None = None
+    shadow_weights: dict[str, float] = field(default_factory=dict)
+    window_suspected: bool = False
+    # Kept apart from faults so shadow problems never change the status level
+    room_faults: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -151,12 +167,29 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._indoor_history: deque[tuple[datetime, float]] = deque()
         self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
         self._inner: "InnerCoordinator | None" = None  # set by __init__.py after both are created
+        # Rooms (shadow mode), one model per room subentry
+        self._rooms: dict[str, RoomModel] = {
+            sid: RoomModel(_room_params(sub.data))
+            for sid, sub in entry.subentries.items()
+            if sub.subentry_type == SUBENTRY_TYPE_ROOM
+        }
+        # target / importance / ramp time per room, pushed by the room number entities
+        self._room_inputs: dict[str, dict[str, float]] = {sid: {} for sid in self._rooms}
+        self._scoring_paused: bool = False
+        self._rooms_store: Store[dict[str, dict]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.rooms")
 
     async def async_load_state(self) -> None:
         """Restore d_hat persisted by the previous run (falls back to the options value)."""
         stored = await self._store.async_load()
         if stored and "d_hat" in stored:
             self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, float(stored["d_hat"])))
+        rooms = await self._rooms_store.async_load() or {}
+        for sid, model in self._rooms.items():
+            if sid in rooms:
+                try:
+                    model.load_dict(rooms[sid])
+                except (TypeError, ValueError, KeyError) as err:
+                    _LOGGER.warning("Ignoring stored state for room %s: %s", sid, err)
 
     def set_disturbance_estimate(self, value: float) -> None:
         self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, value))
@@ -168,6 +201,18 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
     async def async_flush_state(self) -> None:
         """Write d_hat immediately so a reload picks up the latest value."""
         await self._store.async_save({"d_hat": self._d_hat})
+        if self._rooms:
+            await self._rooms_store.async_save(self._rooms_state())
+
+    def set_room_input(self, subentry_id: str, key: str, value: float) -> None:
+        if subentry_id in self._room_inputs:
+            self._room_inputs[subentry_id][key] = value
+
+    def set_scoring_paused(self, paused: bool) -> None:
+        self._scoring_paused = paused
+
+    def _rooms_state(self) -> dict[str, dict]:
+        return {sid: model.to_dict() for sid, model in self._rooms.items()}
 
     def _opt(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, default)
@@ -192,6 +237,11 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             return float(state.state)
         except (ValueError, TypeError):
             return None
+
+    def _forecast_hours(self) -> int:
+        """Hourly forecast values to fetch: the control horizon, and the room scoring horizon."""
+        hours = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
+        return max(hours, SCORE_HORIZON_H) if self._rooms else hours
 
     async def _async_update_data(self) -> OuterData:
         faults: list[str] = []
@@ -277,6 +327,19 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             hvac_mode, status, supply_setpoint, predicted_corrected, target_temp, indoor_temp, faults
         )
 
+        # --- Rooms (shadow mode) ---
+        room_data: dict[str, Any] = {}
+        if self._rooms:
+            room_faults: list[str] = []
+            try:
+                room_data = self._run_rooms(
+                    outdoor_temp, smhi_outdoor_forecast, solar_forecast, supply_setpoint, room_faults
+                )
+            except Exception as err:
+                _LOGGER.warning("Room shadow models failed: %s", err)
+                room_faults.append("rooms_error")
+            room_data["room_faults"] = room_faults
+
         return OuterData(
             supply_setpoint=supply_setpoint,
             predicted_indoor_temp=predicted_corrected,
@@ -292,7 +355,72 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             smhi_forecast=smhi_outdoor_forecast,
             disturbance_estimate=self._d_hat,
             setpoint_valid=self._has_valid_setpoint,
+            **room_data,
         )
+
+    def _run_rooms(
+        self,
+        outdoor_temp: float | None,
+        smhi_forecast: list[float],
+        solar_forecast: list[float],
+        live_supply: float,
+        room_faults: list[str],
+    ) -> dict[str, Any]:
+        """Step every room model on the house forecasts and combine the room setpoints."""
+        rooms: dict[str, RoomResult | None] = {sid: None for sid in self._rooms}
+        if outdoor_temp is None or not self._has_valid_setpoint:
+            room_faults.append("rooms_skipped_no_setpoint")
+            return {"rooms": rooms}
+
+        now = datetime.now(timezone.utc).timestamp()
+        house_target = float(self._opt(CONF_TARGET_TEMPERATURE, DEFAULT_TARGET_TEMPERATURE))
+        horizon_h = float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
+        supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
+        pump_off = self._pump_off()
+
+        for sid, model in self._rooms.items():
+            sub = self._entry.subentries.get(sid)
+            name = sub.title if sub else sid
+            t_room = self._get_sensor_value(sub.data.get(CONF_ROOM_SENSOR, "")) if sub else None
+            if t_room is None:
+                room_faults.append(f"room_{name}_unavailable")
+                continue
+            inputs = self._room_inputs.get(sid, {})
+            try:
+                rooms[sid] = model.step(
+                    now=now,
+                    t_room=t_room,
+                    target=float(inputs.get(ROOM_INPUT_TARGET, house_target)),
+                    commanded_importance=inputs.get(ROOM_INPUT_IMPORTANCE),
+                    ramp_minutes=float(inputs.get(ROOM_INPUT_RAMP, DEFAULT_IMPORTANCE_RAMP_MIN)),
+                    outdoor_forecast=smhi_forecast,
+                    solar_forecast=solar_forecast,
+                    t_out=outdoor_temp,
+                    live_supply=live_supply,
+                    pump_off=pump_off,
+                    horizon_h=horizon_h,
+                    supply_min=supply_min,
+                    supply_max=supply_max,
+                    scoring_paused=self._scoring_paused,
+                )
+            except Exception as err:
+                _LOGGER.warning("Room %s shadow model failed: %s", name, err)
+                room_faults.append(f"room_{name}_error")
+
+        self._rooms_store.async_delay_save(self._rooms_state, _STATE_SAVE_DELAY)
+
+        weights = {sid: r.importance_ramped for sid, r in rooms.items() if r is not None}
+        shadow_mean, shadow_max = combine(
+            {sid: (r.supply_setpoint, r.importance_ramped) for sid, r in rooms.items() if r is not None}
+        )
+        return {
+            "rooms": rooms,
+            "shadow_supply_setpoint": shadow_mean,
+            "shadow_supply_max": shadow_max,
+            "shadow_weights": weights,
+            "window_suspected": any(r.anomaly for r in rooms.values() if r is not None),
+        }
 
     def _compute_controller_action(
         self,
@@ -393,7 +521,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         reading the forecast attribute directly from the entity state.
         """
         weather_entity = self._entry.data.get(CONF_WEATHER_ENTITY)
-        horizon = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
+        horizon = self._forecast_hours()
 
         if not weather_entity:
             faults.append("smhi_not_configured")
@@ -438,7 +566,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self, faults: list[str]
     ) -> tuple[list[float], bool]:
         """Fetch hourly solar irradiance from Open-Meteo, with caching."""
-        horizon = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
+        horizon = self._forecast_hours()
         now = datetime.now(timezone.utc)
 
         # Fetch fresh data if cache is stale; otherwise re-use raw arrays
@@ -513,24 +641,12 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         # Determine model step size and number of steps
         # Sub-hourly horizons use a single step of dt = horizon; ≥1 h uses integer hourly steps
         horizon_h = float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))
-        if horizon_h < 1.0:
-            dt_hours = horizon_h
-            model_outdoor = smhi_forecast[:1] or [outdoor_temp]
-            model_solar = solar_forecast[:1] or [0.0]
-        else:
-            dt_hours = 1.0
-            n_steps = max(1, round(horizon_h))
-            fallback_t = smhi_forecast[-1] if smhi_forecast else outdoor_temp
-            fallback_s = solar_forecast[-1] if solar_forecast else 0.0
-            model_outdoor = (smhi_forecast + [fallback_t] * n_steps)[:n_steps]
-            model_solar = (solar_forecast + [fallback_s] * n_steps)[:n_steps]
+        model_outdoor, model_solar, dt_hours = model_inputs(
+            horizon_h, smhi_forecast, solar_forecast, outdoor_temp
+        )
 
         # When pump is off, no heat is delivered — simulate with T_indoor as effective supply
-        pump_off = (
-            self._inner is not None
-            and self._inner.data is not None
-            and self._inner.data.pump_state == "off"
-        )
+        pump_off = self._pump_off()
 
         try:
             setpoint, predicted = compute_supply_setpoint(
@@ -554,6 +670,13 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             _LOGGER.warning("RC-MPC failed: %s", err)
             faults.append(f"mpc_error: {err}")
             return self._last_supply_setpoint, None
+
+    def _pump_off(self) -> bool:
+        return (
+            self._inner is not None
+            and self._inner.data is not None
+            and self._inner.data.pump_state == "off"
+        )
 
 
 class InnerCoordinator(DataUpdateCoordinator[InnerData]):
@@ -830,6 +953,15 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             )
         except Exception as err:
             _LOGGER.warning("Failed to write potentiometer value %s: %s", value, err)
+
+
+def _room_params(data: Any) -> RoomParams:
+    return RoomParams(
+        R=float(data.get(CONF_RC_R, DEFAULT_RC_R)),
+        C=float(data.get(CONF_RC_C, DEFAULT_RC_C)),
+        UA=float(data.get(CONF_RC_UA, DEFAULT_RC_UA)),
+        g=float(data.get(CONF_RC_G, DEFAULT_RC_G)),
+    )
 
 
 def _flat_forecast(value: float | None, length: int) -> list[float]:

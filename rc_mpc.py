@@ -97,3 +97,26 @@ def _simulate_forward(
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def model_inputs(
+    horizon_h: float,
+    outdoor_forecast: list[float],
+    solar_forecast: list[float],
+    fallback_outdoor: float,
+) -> tuple[list[float], list[float], float]:
+    """Return (outdoor_temps, solar_irradiance, dt_hours) for a horizon.
+
+    Sub-hourly horizons use a single step of dt = horizon; ≥1 h uses integer hourly
+    steps, padded with the last forecast value when the forecast is short.
+    """
+    if horizon_h < 1.0:
+        return outdoor_forecast[:1] or [fallback_outdoor], solar_forecast[:1] or [0.0], horizon_h
+    n_steps = max(1, round(horizon_h))
+    fallback_t = outdoor_forecast[-1] if outdoor_forecast else fallback_outdoor
+    fallback_s = solar_forecast[-1] if solar_forecast else 0.0
+    return (
+        (outdoor_forecast + [fallback_t] * n_steps)[:n_steps],
+        (solar_forecast + [fallback_s] * n_steps)[:n_steps],
+        1.0,
+    )

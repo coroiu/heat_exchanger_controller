@@ -11,7 +11,7 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -33,6 +33,7 @@ from .const import (
     DEFAULT_SUPPLY_MIN,
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
+    SUBENTRY_TYPE_ROOM,
 )
 from .coordinator import OuterCoordinator
 
@@ -166,3 +167,17 @@ def _device_info(entry: ConfigEntry) -> dict:
         "manufacturer": "Custom",
         "model": "Heat Exchanger Controller",
     }
+
+
+def _room_device_info(entry: ConfigEntry, subentry: ConfigSubentry) -> dict:
+    return {
+        "identifiers": {(DOMAIN, f"{entry.entry_id}_{subentry.subentry_id}")},
+        "name": subentry.title,
+        "manufacturer": "Custom",
+        "model": "Room (shadow mode)",
+        "via_device": (DOMAIN, entry.entry_id),
+    }
+
+
+def _room_subentries(entry: ConfigEntry) -> list[ConfigSubentry]:
+    return [s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_ROOM]

@@ -4,7 +4,9 @@ from homeassistant.const import Platform
 
 DOMAIN = "heat_exchanger_controller"
 
-PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.NUMBER, Platform.SWITCH]
+PLATFORMS: list[Platform] = [
+    Platform.CLIMATE, Platform.SENSOR, Platform.NUMBER, Platform.SWITCH, Platform.BINARY_SENSOR,
+]
 
 # --- Setup (stored in entry.data) ---
 CONF_NAME = "name"
@@ -85,6 +87,18 @@ DISTURBANCE_MAX = 1.5
 DEFAULT_PUMP_OFF_THRESHOLD = 100.0  # above normal output range → feature disabled by default
 DEFAULT_MIN_PUMP_ON_DURATION = 20  # minutes
 DEFAULT_BOOST_TRIGGER_SPAN = 0.3  # °C below target that triggers a preventive boost
+
+# --- Rooms (config subentries, shadow mode) ---
+SUBENTRY_TYPE_ROOM = "room"
+# Room subentry data: name (title), sensor, and the RC keys CONF_RC_R/C/UA/G
+CONF_ROOM_SENSOR = "room_sensor"
+# Room state inputs (number entities, restored on restart; never reload)
+ROOM_INPUT_TARGET = "target"
+ROOM_INPUT_IMPORTANCE = "importance"
+ROOM_INPUT_RAMP = "importance_ramp_time"
+DEFAULT_ROOM_TARGET = 22.0
+DEFAULT_ROOM_IMPORTANCE = 1.0
+DEFAULT_IMPORTANCE_RAMP_MIN = 45
 
 # --- Status ---
 STATUS_OK = "ok"

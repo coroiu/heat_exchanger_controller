@@ -41,6 +41,50 @@
       "no_outdoor_sensors": "Select at least one outdoor temperature sensor."
     }
   },
+  "config_subentries": {
+    "room": {
+      "initiate_flow": {
+        "user": "Add room",
+        "reconfigure": "Reconfigure room"
+      },
+      "entry_type": "Room",
+      "step": {
+        "user": {
+          "title": "Add room",
+          "data": {
+            "name": "Name",
+            "room_sensor": "Room temperature sensor",
+            "rc_r": "Thermal resistance R (°C/W)",
+            "rc_ua": "Radiator coefficient UA (W/°C)",
+            "rc_g": "Solar aperture g (m²)",
+            "rc_c": "Thermal capacitance C (Wh/°C)"
+          },
+          "data_description": {
+            "room_sensor": "The room's own sensor. The live controller keeps steering on the house indoor sensor; rooms run in shadow mode only.",
+            "rc_r": "Defaults come from the house model. Seed from tools/fit_rc_multistep.py with this room's sensor."
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure room",
+          "data": {
+            "name": "Name",
+            "room_sensor": "Room temperature sensor",
+            "rc_r": "Thermal resistance R (°C/W)",
+            "rc_ua": "Radiator coefficient UA (W/°C)",
+            "rc_g": "Solar aperture g (m²)",
+            "rc_c": "Thermal capacitance C (Wh/°C)"
+          },
+          "data_description": {
+            "room_sensor": "The room's own sensor. The live controller keeps steering on the house indoor sensor; rooms run in shadow mode only.",
+            "rc_r": "Defaults come from the house model. Seed from tools/fit_rc_multistep.py with this room's sensor."
+          }
+        }
+      },
+      "abort": {
+        "reconfigure_successful": "Room updated."
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {
@@ -77,19 +121,45 @@
           "starting": "Starting"
         }
       },
-      "controller_action": { "name": "Controller action" },
-      "supply_temp_setpoint": { "name": "Supply temp setpoint" },
-      "predicted_indoor_temp": { "name": "Predicted indoor temp" },
-      "outdoor_temp_source": { "name": "Outdoor temp source" },
-      "solar_irradiance": { "name": "Solar irradiance" },
-      "indoor_temp_used": { "name": "Indoor temp (used)" },
-      "outdoor_temp_used": { "name": "Outdoor temp (used)" },
-      "supply_temp_actual": { "name": "Supply temp (actual)" },
-      "potentiometer_output": { "name": "Potentiometer output" },
-      "pid_error": { "name": "PID error" },
-      "pid_p_term": { "name": "PID P term" },
-      "pid_i_term": { "name": "PID I term" },
-      "pid_d_term": { "name": "PID D term" },
+      "controller_action": {
+        "name": "Controller action"
+      },
+      "supply_temp_setpoint": {
+        "name": "Supply temp setpoint"
+      },
+      "predicted_indoor_temp": {
+        "name": "Predicted indoor temp"
+      },
+      "outdoor_temp_source": {
+        "name": "Outdoor temp source"
+      },
+      "solar_irradiance": {
+        "name": "Solar irradiance"
+      },
+      "indoor_temp_used": {
+        "name": "Indoor temp (used)"
+      },
+      "outdoor_temp_used": {
+        "name": "Outdoor temp (used)"
+      },
+      "supply_temp_actual": {
+        "name": "Supply temp (actual)"
+      },
+      "potentiometer_output": {
+        "name": "Potentiometer output"
+      },
+      "pid_error": {
+        "name": "PID error"
+      },
+      "pid_p_term": {
+        "name": "PID P term"
+      },
+      "pid_i_term": {
+        "name": "PID I term"
+      },
+      "pid_d_term": {
+        "name": "PID D term"
+      },
       "pump_state": {
         "name": "Pump state",
         "state": {
@@ -98,34 +168,110 @@
           "boosting": "Boosting"
         }
       },
-      "smhi_forecast": { "name": "SMHI outdoor forecast" }
+      "smhi_forecast": {
+        "name": "SMHI outdoor forecast"
+      },
+      "room_importance_ramped": {
+        "name": "Importance (ramped)"
+      },
+      "room_predicted_temp": {
+        "name": "Predicted temp"
+      },
+      "room_supply_setpoint": {
+        "name": "Supply setpoint"
+      },
+      "room_prediction_error": {
+        "name": "Prediction error (3 h RMS)"
+      },
+      "shadow_supply_setpoint": {
+        "name": "Shadow supply setpoint"
+      }
     },
     "number": {
-      "rc_r": { "name": "Thermal resistance (R)" },
-      "rc_c": { "name": "Thermal capacitance (C)" },
-      "rc_ua": { "name": "Radiator coefficient (UA)" },
-      "rc_g": { "name": "Solar aperture (g)" },
-      "pid_kp": { "name": "PID Kp" },
-      "pid_ki": { "name": "PID Ki" },
-      "pid_kd": { "name": "PID Kd" },
-      "supply_min": { "name": "Supply temp minimum" },
-      "supply_max": { "name": "Supply temp maximum" },
-      "output_min": { "name": "Potentiometer minimum" },
-      "output_max": { "name": "Potentiometer maximum" },
-      "prediction_horizon": { "name": "Prediction horizon" },
-      "outer_interval": { "name": "Outer loop interval" },
-      "inner_interval": { "name": "Inner loop interval" },
-      "pump_off_threshold": { "name": "Pump-off threshold" },
-      "min_pump_on_duration": { "name": "Min pump-on duration" },
-      "disturbance_alpha": { "name": "Disturbance smoothing (α)" },
-      "disturbance_estimate": { "name": "Disturbance estimate" },
-      "boost_trigger_span": { "name": "Boost trigger span" }
+      "rc_r": {
+        "name": "Thermal resistance (R)"
+      },
+      "rc_c": {
+        "name": "Thermal capacitance (C)"
+      },
+      "rc_ua": {
+        "name": "Radiator coefficient (UA)"
+      },
+      "rc_g": {
+        "name": "Solar aperture (g)"
+      },
+      "pid_kp": {
+        "name": "PID Kp"
+      },
+      "pid_ki": {
+        "name": "PID Ki"
+      },
+      "pid_kd": {
+        "name": "PID Kd"
+      },
+      "supply_min": {
+        "name": "Supply temp minimum"
+      },
+      "supply_max": {
+        "name": "Supply temp maximum"
+      },
+      "output_min": {
+        "name": "Potentiometer minimum"
+      },
+      "output_max": {
+        "name": "Potentiometer maximum"
+      },
+      "prediction_horizon": {
+        "name": "Prediction horizon"
+      },
+      "outer_interval": {
+        "name": "Outer loop interval"
+      },
+      "inner_interval": {
+        "name": "Inner loop interval"
+      },
+      "pump_off_threshold": {
+        "name": "Pump-off threshold"
+      },
+      "min_pump_on_duration": {
+        "name": "Min pump-on duration"
+      },
+      "disturbance_alpha": {
+        "name": "Disturbance smoothing (α)"
+      },
+      "disturbance_estimate": {
+        "name": "Disturbance estimate"
+      },
+      "boost_trigger_span": {
+        "name": "Boost trigger span"
+      },
+      "room_target": {
+        "name": "Target"
+      },
+      "room_importance": {
+        "name": "Importance"
+      },
+      "room_importance_ramp_time": {
+        "name": "Importance ramp time"
+      }
     },
     "climate": {
-      "heat_exchanger_climate": { "name": "Heat Exchanger" }
+      "heat_exchanger_climate": {
+        "name": "Heat Exchanger"
+      }
     },
     "switch": {
-      "dry_run": { "name": "Dry run" }
+      "dry_run": {
+        "name": "Dry run"
+      },
+      "scoring_paused": {
+        "name": "Room scoring paused"
+      }
+    },
+    "binary_sensor": {
+      "window_suspected": {
+        "name": "Window suspected"
+      }
     }
   }
 }

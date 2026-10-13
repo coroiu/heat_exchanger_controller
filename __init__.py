@@ -20,6 +20,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     RELOAD_ON_CHANGE_KEYS,
+    SUBENTRY_TYPE_ROOM,
 )
 from .coordinator import InnerCoordinator, OuterCoordinator
 
@@ -55,7 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         raise ConfigEntryNotReady(f"Outer coordinator failed on first refresh: {err}") from err
 
-    structural_snapshot = {k: entry.options.get(k) for k in RELOAD_ON_CHANGE_KEYS}
+    structural_snapshot = _structural_snapshot(entry)
     entry.runtime_data = HeatExchangerRuntimeData(
         outer=outer, inner=inner, structural_opts_snapshot=structural_snapshot
     )
@@ -94,9 +95,7 @@ async def _async_options_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
     # Since options flow only changes structural params, and climate entity writes only
     # target_temperature/hvac_mode via async_update_entry, we check which keys changed.
 
-    curr_structural = {k: entry.options.get(k) for k in RELOAD_ON_CHANGE_KEYS}
-
-    if curr_structural == runtime.structural_opts_snapshot:
+    if _structural_snapshot(entry) == runtime.structural_opts_snapshot:
         # Only climate state keys changed (target_temperature / hvac_mode) — no reload needed
         await runtime.outer.async_request_refresh()
         await runtime.inner.async_request_refresh()
@@ -104,3 +103,17 @@ async def _async_options_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
 
     # Structural params changed — full reload
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _structural_snapshot(entry: ConfigEntry) -> dict:
+    """Values whose change needs a reload: structural options, and the room subentries.
+
+    Adding, removing or editing a room changes the rooms part. Room targets and
+    importance live in entities, not in the entry, so they never reload.
+    """
+    rooms = {
+        sid: (sub.title, dict(sub.data))
+        for sid, sub in entry.subentries.items()
+        if sub.subentry_type == SUBENTRY_TYPE_ROOM
+    }
+    return {"options": {k: entry.options.get(k) for k in RELOAD_ON_CHANGE_KEYS}, "rooms": rooms}

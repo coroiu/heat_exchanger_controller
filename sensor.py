@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import UnitOfIrradiance, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import HeatExchangerRuntimeData
-from .climate import _device_info
+from .climate import _device_info, _room_device_info, _room_subentries
 from .const import DOMAIN
 from .coordinator import InnerCoordinator, OuterCoordinator
+from .room_model import RoomResult
 
 
 async def async_setup_entry(
@@ -41,6 +42,19 @@ async def async_setup_entry(
             SmhiForecastSensor(entry, runtime.outer),
         ]
     )
+    rooms = _room_subentries(entry)
+    if rooms:
+        async_add_entities([ShadowSupplySetpointSensor(entry, runtime.outer)])
+    for sub in rooms:
+        async_add_entities(
+            [
+                RoomImportanceRampedSensor(entry, sub, runtime.outer),
+                RoomPredictedTempSensor(entry, sub, runtime.outer),
+                RoomSupplySetpointSensor(entry, sub, runtime.outer),
+                RoomPredictionErrorSensor(entry, sub, runtime.outer),
+            ],
+            config_subentry_id=sub.subentry_id,
+        )
 
 
 class _OuterSensor(CoordinatorEntity[OuterCoordinator], SensorEntity):
@@ -87,6 +101,8 @@ class StatusSensor(_OuterSensor):
             attrs["open_meteo_available"] = outer.open_meteo_available
             attrs["outdoor_temp_source"] = outer.outdoor_temp_source
             attrs["indoor_temp_assumed"] = outer.indoor_temp is None
+            if outer.room_faults:
+                attrs["room_faults"] = outer.room_faults
 
         if inner is not None:
             attrs["inner_loop_mode"] = inner.inner_mode
@@ -396,3 +412,133 @@ class PumpStateSensor(_InnerSensor):
         if self.coordinator.data is None:
             return {}
         return {"protection_active": self.coordinator.data.pump_protection_active}
+
+
+class ShadowSupplySetpointSensor(_OuterSensor):
+    """Importance-weighted mean of the room setpoints (shadow mode, not applied)."""
+
+    _attr_translation_key = "shadow_supply_setpoint"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_shadow_supply_setpoint"
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return super().available and data is not None and data.shadow_supply_setpoint is not None
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None or self.coordinator.data.shadow_supply_setpoint is None:
+            return None
+        return round(self.coordinator.data.shadow_supply_setpoint, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        names = {sid: sub.title for sid, sub in self._entry.subentries.items()}
+        return {
+            "max_rule": round(data.shadow_supply_max, 2) if data.shadow_supply_max is not None else None,
+            "weights": {names.get(sid, sid): round(w, 3) for sid, w in data.shadow_weights.items()},
+            "live_supply_setpoint": round(data.supply_setpoint, 2),
+        }
+
+
+class _RoomSensor(CoordinatorEntity[OuterCoordinator], SensorEntity):
+    """A room's shadow-mode value; unavailable while the room's sensor is."""
+
+    _attr_has_entity_name = True
+    _key = ""
+
+    def __init__(self, entry: ConfigEntry, subentry: ConfigSubentry, coordinator: OuterCoordinator) -> None:
+        super().__init__(coordinator)
+        self._subentry_id = subentry.subentry_id
+        self._attr_unique_id = f"{entry.entry_id}_{subentry.subentry_id}_{self._key}"
+        self._attr_device_info = _room_device_info(entry, subentry)
+
+    @property
+    def _room(self) -> RoomResult | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.rooms.get(self._subentry_id)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._room is not None
+
+
+class _RoomTempSensor(_RoomSensor):
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+
+class RoomImportanceRampedSensor(_RoomSensor):
+    _attr_translation_key = "room_importance_ramped"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _key = "importance_ramped"
+
+    @property
+    def native_value(self) -> float | None:
+        room = self._room
+        return round(room.importance_ramped, 3) if room else None
+
+
+class RoomPredictedTempSensor(_RoomTempSensor):
+    """Room temperature at the control horizon under the live supply setpoint."""
+
+    _attr_translation_key = "room_predicted_temp"
+    _key = "predicted_temp"
+
+    @property
+    def native_value(self) -> float | None:
+        room = self._room
+        return round(room.predicted_temp, 2) if room else None
+
+
+class RoomSupplySetpointSensor(_RoomTempSensor):
+    """Supply this room's own MPC would request to reach its target."""
+
+    _attr_translation_key = "room_supply_setpoint"
+    _key = "supply_setpoint"
+
+    @property
+    def native_value(self) -> float | None:
+        room = self._room
+        return round(room.supply_setpoint, 2) if room else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        room = self._room
+        return {"target": room.target, "temperature": room.temperature} if room else {}
+
+
+class RoomPredictionErrorSensor(_RoomSensor):
+    """Rolling 24 h RMS of the 3 h-ahead prediction error."""
+
+    _attr_translation_key = "room_prediction_error"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _key = "prediction_error"
+
+    @property
+    def native_value(self) -> float | None:
+        room = self._room
+        return round(room.error_rms, 3) if room and room.error_rms is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        room = self._room
+        if room is None:
+            return {}
+        return {
+            "bias": round(room.error_bias, 3) if room.error_bias is not None else None,
+            "samples": room.error_samples,
+            "anomaly": room.anomaly,
+        }

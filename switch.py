@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import HeatExchangerRuntimeData
-from .climate import _device_info
+from .climate import _device_info, _room_subentries
 from .const import CONF_DRY_RUN, DEFAULT_DRY_RUN, DOMAIN
 
 
@@ -18,7 +18,11 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([DryRunSwitch(entry)])
+    runtime: HeatExchangerRuntimeData = entry.runtime_data
+    entities: list[SwitchEntity] = [DryRunSwitch(entry)]
+    if _room_subentries(entry):
+        entities.append(ScoringPausedSwitch(entry, runtime))
+    async_add_entities(entities)
 
 
 class DryRunSwitch(RestoreEntity, SwitchEntity):
@@ -61,3 +65,35 @@ class DryRunSwitch(RestoreEntity, SwitchEntity):
         new_options = dict(self._entry.options)
         new_options[CONF_DRY_RUN] = self._is_on
         self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+
+
+class ScoringPausedSwitch(RestoreEntity, SwitchEntity):
+    """Pause room prediction scoring (open windows etc.); predictions keep running."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "scoring_paused"
+    _attr_icon = "mdi:pause-circle-outline"
+
+    def __init__(self, entry: ConfigEntry, runtime: HeatExchangerRuntimeData) -> None:
+        self._outer = runtime.outer
+        self._attr_unique_id = f"{entry.entry_id}_scoring_paused"
+        self._attr_device_info = _device_info(entry)
+        self._attr_is_on = False
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            self._attr_is_on = last_state.state == "on"
+        self._outer.set_scoring_paused(self._attr_is_on)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        self._set(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self._set(False)
+
+    def _set(self, paused: bool) -> None:
+        self._attr_is_on = paused
+        self._outer.set_scoring_paused(paused)
+        self.async_write_ha_state()
