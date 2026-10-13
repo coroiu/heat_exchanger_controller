@@ -328,9 +328,17 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         effective_target = target_temp + self._d_hat
 
         # --- RC-MPC ---
-        supply_setpoint, predicted_indoor = self._run_mpc(
-            t_in, effective_target, outdoor_temp, smhi_outdoor_forecast, solar_forecast, faults
-        )
+        if indoor_temp is None and not self._has_valid_setpoint:
+            # Right after a restart the indoor sensor is often not loaded yet. Assuming
+            # indoor = target would give a real-looking but wrong first setpoint, so keep
+            # the inner loop holding (awaiting_setpoint) until a reading arrives. Later
+            # dropouts still fall back to the target.
+            faults.append("mpc_skipped_no_indoor")
+            supply_setpoint, predicted_indoor = self._last_supply_setpoint, None
+        else:
+            supply_setpoint, predicted_indoor = self._run_mpc(
+                t_in, effective_target, outdoor_temp, smhi_outdoor_forecast, solar_forecast, faults
+            )
 
         # Shift prediction back to "expected actual" space by removing the model bias
         predicted_corrected = (
@@ -527,6 +535,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             return "Starting"
         if "mpc_skipped_no_outdoor" in faults:
             return "Fault: no outdoor temperature"
+        if "mpc_skipped_no_indoor" in faults:
+            return "Waiting for indoor temperature"
         if (
             self._inner is not None
             and self._inner.data is not None
