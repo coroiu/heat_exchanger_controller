@@ -69,8 +69,12 @@ from .const import (
     DEFAULT_SUPPLY_MAX,
     DEFAULT_SUPPLY_MIN,
     DEFAULT_IMPORTANCE_RAMP_MIN,
+    DEFAULT_PATH_BAND,
+    DEFAULT_PATH_HORIZON,
     DEFAULT_TARGET_TEMPERATURE,
     DOMAIN,
+    PATH_INPUT_BAND,
+    PATH_INPUT_HORIZON,
     ROOM_INPUT_IMPORTANCE,
     ROOM_INPUT_RAMP,
     ROOM_INPUT_TARGET,
@@ -85,6 +89,7 @@ from .const import (
 )
 from .pid import SimplePID
 from .rc_mpc import compute_supply_setpoint, model_inputs
+from .path_mpc import PathResult, PathRoom, plan_supply
 from .room_model import SCORE_HORIZON_H, RoomModel, RoomParams, RoomResult, combine
 
 _LOGGER = logging.getLogger(__name__)
@@ -123,8 +128,13 @@ class OuterData:
     shadow_supply_max: float | None = None
     shadow_weights: dict[str, float] = field(default_factory=dict)
     window_suspected: bool = False
+    # --- Path MPC (shadow mode) ---
+    path: PathResult | None = None  # rooms plan; paths follow path_rooms
+    path_rooms: list[str] = field(default_factory=list)
+    house_path: PathResult | None = None  # house model on the steering sensor
+    path_start: datetime | None = None  # plan hour k starts at path_start + k h
     # Kept apart from faults so shadow problems never change the status level
-    room_faults: list[str] = field(default_factory=list)
+    shadow_faults: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -176,6 +186,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         # target / importance / ramp time per room, pushed by the room number entities
         self._room_inputs: dict[str, dict[str, float]] = {sid: {} for sid in self._rooms}
         self._scoring_paused: bool = False
+        # Path MPC: settings pushed by number entities, and the last plans for warm starts
+        self._path_inputs: dict[str, float] = {}
+        self._path_warm: dict[str, tuple[datetime, list[float]]] = {}
         self._rooms_store: Store[dict[str, dict]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.rooms")
 
     async def async_load_state(self) -> None:
@@ -211,6 +224,12 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
     def set_scoring_paused(self, paused: bool) -> None:
         self._scoring_paused = paused
 
+    def set_path_input(self, key: str, value: float) -> None:
+        self._path_inputs[key] = value
+
+    def _path_horizon(self) -> int:
+        return max(1, round(self._path_inputs.get(PATH_INPUT_HORIZON, DEFAULT_PATH_HORIZON)))
+
     def _rooms_state(self) -> dict[str, dict]:
         return {sid: model.to_dict() for sid, model in self._rooms.items()}
 
@@ -239,9 +258,14 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             return None
 
     def _forecast_hours(self) -> int:
-        """Hourly forecast values to fetch: the control horizon, and the room scoring horizon."""
+        """Hourly forecast values to fetch: the control, room scoring and path horizons.
+
+        The live MPC slices its own horizon, so a longer fetch doesn't change it.
+        """
         hours = max(1, math.ceil(float(self._opt(CONF_PREDICTION_HORIZON, DEFAULT_PREDICTION_HORIZON))))
-        return max(hours, SCORE_HORIZON_H) if self._rooms else hours
+        if self._rooms:
+            hours = max(hours, SCORE_HORIZON_H)
+        return max(hours, self._path_horizon())
 
     async def _async_update_data(self) -> OuterData:
         faults: list[str] = []
@@ -327,18 +351,27 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             hvac_mode, status, supply_setpoint, predicted_corrected, target_temp, indoor_temp, faults
         )
 
-        # --- Rooms (shadow mode) ---
-        room_data: dict[str, Any] = {}
+        # --- Shadow mode: rooms, then path MPC (never read by the live path) ---
+        shadow: dict[str, Any] = {}
+        shadow_faults: list[str] = []
         if self._rooms:
-            room_faults: list[str] = []
             try:
-                room_data = self._run_rooms(
-                    outdoor_temp, smhi_outdoor_forecast, solar_forecast, supply_setpoint, room_faults
-                )
+                shadow.update(self._run_rooms(
+                    outdoor_temp, smhi_outdoor_forecast, solar_forecast, supply_setpoint, shadow_faults
+                ))
             except Exception as err:
                 _LOGGER.warning("Room shadow models failed: %s", err)
-                room_faults.append("rooms_error")
-            room_data["room_faults"] = room_faults
+                shadow_faults.append("rooms_error")
+        if outdoor_temp is not None and self._has_valid_setpoint:
+            try:
+                shadow.update(self._run_paths(
+                    indoor_temp, effective_target, outdoor_temp, smhi_outdoor_forecast,
+                    solar_forecast, supply_setpoint, shadow.get("rooms", {}), shadow_faults,
+                ))
+            except Exception as err:
+                _LOGGER.warning("Path MPC failed: %s", err)
+                shadow_faults.append("path_mpc_error")
+        shadow["shadow_faults"] = shadow_faults
 
         return OuterData(
             supply_setpoint=supply_setpoint,
@@ -355,8 +388,64 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             smhi_forecast=smhi_outdoor_forecast,
             disturbance_estimate=self._d_hat,
             setpoint_valid=self._has_valid_setpoint,
-            **room_data,
+            **shadow,
         )
+
+    def _run_paths(
+        self,
+        indoor_temp: float | None,
+        house_target: float,
+        outdoor_temp: float,
+        smhi_forecast: list[float],
+        solar_forecast: list[float],
+        live_supply: float,
+        rooms: dict[str, RoomResult | None],
+        faults: list[str],
+    ) -> dict[str, Any]:
+        """Plan the supply over the path horizon for the rooms and for the house model."""
+        now = datetime.now(timezone.utc)
+        n = self._path_horizon()
+        outdoor, solar, _ = model_inputs(n, smhi_forecast, solar_forecast, outdoor_temp)
+        band = float(self._path_inputs.get(PATH_INPUT_BAND, DEFAULT_PATH_BAND))
+        supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
+
+        def run(key: str, path_rooms: list[PathRoom]) -> PathResult | None:
+            result = plan_supply(
+                path_rooms, outdoor, solar, supply_min, supply_max, band, live_supply,
+                warm_start=self._warm_start(key, now, n),
+            )
+            if result is None:
+                return None
+            if not result.converged:
+                faults.append(f"path_mpc_{key}_not_converged")
+            self._path_warm[key] = (now, result.plan)
+            return result
+
+        out: dict[str, Any] = {"path_start": now}
+        ids = [sid for sid, r in rooms.items() if r is not None]
+        if ids:
+            out["path_rooms"] = ids
+            out["path"] = run("rooms", [
+                PathRoom(rooms[sid].temperature, rooms[sid].target, rooms[sid].importance_ramped,
+                         self._rooms[sid].params)
+                for sid in ids
+            ])
+        if indoor_temp is not None:
+            out["house_path"] = run("house", [
+                PathRoom(indoor_temp, house_target, 1.0, _room_params(self._entry.options))
+            ])
+        return out
+
+    def _warm_start(self, key: str, now: datetime, n: int) -> list[float] | None:
+        """Previous plan, shifted by an hour once the first hour is mostly over."""
+        prev = self._path_warm.get(key)
+        if prev is None or len(prev[1]) != n:
+            return None
+        ts, plan = prev
+        if now - ts >= timedelta(minutes=30):
+            return plan[1:] + plan[-1:]
+        return list(plan)
 
     def _run_rooms(
         self,

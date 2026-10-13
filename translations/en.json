@@ -185,6 +185,15 @@
       },
       "shadow_supply_setpoint": {
         "name": "Shadow supply setpoint"
+      },
+      "path_supply_setpoint": {
+        "name": "Path supply setpoint"
+      },
+      "planned_indoor_temp": {
+        "name": "Planned indoor temp"
+      },
+      "room_planned_temp": {
+        "name": "Planned temp"
       }
     },
     "number": {
@@ -253,6 +262,12 @@
       },
       "room_importance_ramp_time": {
         "name": "Importance ramp time"
+      },
+      "path_comfort_band": {
+        "name": "Path comfort band"
+      },
+      "path_horizon": {
+        "name": "Path horizon"
       }
     },
     "climate": {

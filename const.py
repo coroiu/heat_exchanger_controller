@@ -100,6 +100,12 @@ DEFAULT_ROOM_TARGET = 22.0
 DEFAULT_ROOM_IMPORTANCE = 1.0
 DEFAULT_IMPORTANCE_RAMP_MIN = 45
 
+# --- Path MPC (shadow mode) inputs (number entities, restored on restart; never reload) ---
+PATH_INPUT_BAND = "path_comfort_band"
+PATH_INPUT_HORIZON = "path_horizon"
+DEFAULT_PATH_BAND = 0.2
+DEFAULT_PATH_HORIZON = 6
+
 # --- Status ---
 STATUS_OK = "ok"
 STATUS_DEGRADED = "degraded"

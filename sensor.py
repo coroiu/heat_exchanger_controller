@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import UnitOfIrradiance, UnitOfTemperature
@@ -13,6 +15,7 @@ from . import HeatExchangerRuntimeData
 from .climate import _device_info, _room_device_info, _room_subentries
 from .const import DOMAIN
 from .coordinator import InnerCoordinator, OuterCoordinator
+from .path_mpc import PathResult
 from .room_model import RoomResult
 
 
@@ -40,11 +43,15 @@ async def async_setup_entry(
             PidDTermSensor(entry, runtime.inner),
             PumpStateSensor(entry, runtime.inner),
             SmhiForecastSensor(entry, runtime.outer),
+            PlannedIndoorTempSensor(entry, runtime.outer),
         ]
     )
     rooms = _room_subentries(entry)
     if rooms:
-        async_add_entities([ShadowSupplySetpointSensor(entry, runtime.outer)])
+        async_add_entities([
+            ShadowSupplySetpointSensor(entry, runtime.outer),
+            PathSupplySetpointSensor(entry, runtime.outer),
+        ])
     for sub in rooms:
         async_add_entities(
             [
@@ -52,6 +59,7 @@ async def async_setup_entry(
                 RoomPredictedTempSensor(entry, sub, runtime.outer),
                 RoomSupplySetpointSensor(entry, sub, runtime.outer),
                 RoomPredictionErrorSensor(entry, sub, runtime.outer),
+                RoomPlannedTempSensor(entry, sub, runtime.outer),
             ],
             config_subentry_id=sub.subentry_id,
         )
@@ -101,8 +109,8 @@ class StatusSensor(_OuterSensor):
             attrs["open_meteo_available"] = outer.open_meteo_available
             attrs["outdoor_temp_source"] = outer.outdoor_temp_source
             attrs["indoor_temp_assumed"] = outer.indoor_temp is None
-            if outer.room_faults:
-                attrs["room_faults"] = outer.room_faults
+            if outer.shadow_faults:
+                attrs["shadow_faults"] = outer.shadow_faults
 
         if inner is not None:
             attrs["inner_loop_mode"] = inner.inner_mode
@@ -542,3 +550,127 @@ class RoomPredictionErrorSensor(_RoomSensor):
             "samples": room.error_samples,
             "anomaly": room.anomaly,
         }
+
+
+def _plan_attr(start: datetime, result: PathResult) -> list[dict]:
+    """Hourly supply plan; entry k applies from start + k h."""
+    return [
+        {"t": (start + timedelta(hours=k)).isoformat(), "supply": round(v, 2)}
+        for k, v in enumerate(result.plan)
+    ]
+
+
+def _path_attr(start: datetime, temps: list[float]) -> list[dict]:
+    """Planned temperatures at start + 1 h … start + N h."""
+    return [
+        {"t": (start + timedelta(hours=k + 1)).isoformat(), "temp": round(v, 2)}
+        for k, v in enumerate(temps)
+    ]
+
+
+class PathSupplySetpointSensor(_OuterSensor):
+    """First hour of the path MPC plan for the rooms (shadow mode, not applied)."""
+
+    _attr_translation_key = "path_supply_setpoint"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_path_supply_setpoint"
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return super().available and data is not None and data.path is not None
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        if data is None or data.path is None:
+            return None
+        return round(data.path.plan[0], 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None or data.path is None or data.path_start is None:
+            return {}
+        attrs = {
+            "plan": _plan_attr(data.path_start, data.path),
+            "cost": {"comfort": round(data.path.cost_comfort, 4), "smooth": round(data.path.cost_smooth, 4)},
+            "converged": data.path.converged,
+            "iterations": data.path.iterations,
+            "live_supply_setpoint": round(data.supply_setpoint, 2),
+        }
+        if data.house_path is not None:
+            attrs["house_plan"] = _plan_attr(data.path_start, data.house_path)
+            attrs["house_first_hour"] = round(data.house_path.plan[0], 2)
+        return attrs
+
+
+class PlannedIndoorTempSensor(_OuterSensor):
+    """House model's planned indoor temperature in 1 h, with the whole planned path."""
+
+    _attr_translation_key = "planned_indoor_temp"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_planned_indoor_temp"
+
+    @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return super().available and data is not None and data.house_path is not None
+
+    @property
+    def native_value(self) -> float | None:
+        data = self.coordinator.data
+        if data is None or data.house_path is None:
+            return None
+        return round(data.house_path.paths[0][0], 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None or data.house_path is None or data.path_start is None:
+            return {}
+        return {
+            "path": _path_attr(data.path_start, data.house_path.paths[0]),
+            "plan": _plan_attr(data.path_start, data.house_path),
+            "converged": data.house_path.converged,
+        }
+
+
+class RoomPlannedTempSensor(_RoomTempSensor):
+    """Room temperature in 1 h under the rooms plan, with the whole planned path."""
+
+    _attr_translation_key = "room_planned_temp"
+    _key = "planned_temp"
+
+    def _temps(self) -> list[float] | None:
+        data = self.coordinator.data
+        if data is None or data.path is None or self._subentry_id not in data.path_rooms:
+            return None
+        return data.path.paths[data.path_rooms.index(self._subentry_id)]
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._temps() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        temps = self._temps()
+        return round(temps[0], 2) if temps else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        temps = self._temps()
+        start = self.coordinator.data.path_start if self.coordinator.data else None
+        if temps is None or start is None:
+            return {}
+        return {"path": _path_attr(start, temps)}

@@ -59,10 +59,14 @@ from .const import (
     DEFAULT_SUPPLY_MAX,
     DEFAULT_SUPPLY_MIN,
     DEFAULT_IMPORTANCE_RAMP_MIN,
+    DEFAULT_PATH_BAND,
+    DEFAULT_PATH_HORIZON,
     DEFAULT_ROOM_IMPORTANCE,
     DEFAULT_ROOM_TARGET,
     DOMAIN,
     RELOAD_ON_CHANGE_KEYS,
+    PATH_INPUT_BAND,
+    PATH_INPUT_HORIZON,
     ROOM_INPUT_IMPORTANCE,
     ROOM_INPUT_RAMP,
     ROOM_INPUT_TARGET,
@@ -221,6 +225,25 @@ _ROOM_STATE_NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
 )
 
 
+# Path MPC settings (house device): restored on restart, pushed into the coordinator, never reload
+_PATH_NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
+    HeatExchangerNumberDescription(
+        key=PATH_INPUT_BAND, translation_key="path_comfort_band", conf_key=PATH_INPUT_BAND,
+        default=DEFAULT_PATH_BAND,
+        native_min_value=0.0, native_max_value=1.0, native_step=0.05,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key=PATH_INPUT_HORIZON, translation_key="path_horizon", conf_key=PATH_INPUT_HORIZON,
+        default=DEFAULT_PATH_HORIZON,
+        native_min_value=2, native_max_value=12, native_step=1,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        mode=NumberMode.BOX,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -230,6 +253,7 @@ async def async_setup_entry(
     async_add_entities(
         [HeatExchangerNumber(entry, desc) for desc in _NUMBERS]
         + [DisturbanceEstimateNumber(entry, runtime.outer)]
+        + [PathSettingNumber(entry, runtime.outer, desc) for desc in _PATH_NUMBERS]
     )
     for sub in _room_subentries(entry):
         async_add_entities(
@@ -359,3 +383,31 @@ class RoomStateNumber(RestoreNumber):
         self._coordinator.set_room_input(
             self._subentry_id, self.entity_description.conf_key, float(self._attr_native_value)
         )
+
+
+class PathSettingNumber(RestoreNumber):
+    """A path MPC setting (band, horizon); pushed into the coordinator, never reloads."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, entry: ConfigEntry, coordinator: OuterCoordinator, description: HeatExchangerNumberDescription
+    ) -> None:
+        self.entity_description = description
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = _device_info(entry)
+        self._attr_native_value = description.default
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self._attr_native_value = last.native_value
+        self._coordinator.set_path_input(self.entity_description.conf_key, float(self._attr_native_value))
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        # No refresh: the next outer tick picks it up (a refresh would also step the live observer)
+        self._coordinator.set_path_input(self.entity_description.conf_key, float(value))
+        self.async_write_ha_state()
