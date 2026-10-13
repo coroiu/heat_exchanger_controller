@@ -1,6 +1,26 @@
 # Path-optimising MPC (shadow mode) — design
 
-Date: 2026-10-13. Status: approved, not implemented.
+Date: 2026-10-13. Status: approved; revised after the offline replay (see "Replay outcome").
+
+## Replay outcome (2026-10-13, `tools/replay_path.py`)
+
+Changes to the design below:
+- **The comfort ↔ efficiency slider and the energy term are dropped** (user decision). At a flat kWh price the only saving is a cooler house. The strongest useful weight saved 1.4 % heat while time outside the band rose from 10 % to 15 %, so the target is the honest energy knob (≈ 3 % heat per 0.2 °C).
+- **A weak pull towards the target inside the band was added** (`CENTER_WEIGHT` 0.1). Without it the plan drifts to the band edge and model error pushes the rooms out (20.5 % outside vs 14.1 % today).
+- **Pump off is modelled as a lower bound:** supply ≥ the warmest weighted room, i.e. no heat. This replaces the pump-state rule, because the single-mass model would otherwise let a low supply cool the room.
+- **The smoothing weight is 1e-4.** 1e-3 blocked the hard cut when a room is too warm.
+
+Closed loop over 14 days. The plant is a coupled two-room model, the controllers use the per-room single-mass models, forecasts are perfect and control is hourly:
+
+| | Today (3 h) | Path MPC (6 h) |
+|---|---|---|
+| Time outside ±0.2 °C | 14.1 % | 10.5 % |
+| Worst undershoot | −0.68 °C | −0.37 °C |
+| Worst overshoot | +0.52 °C | +0.52 °C (same; one shared supply can't prevent it) |
+| Heat | 73 kWh | 73 kWh |
+| Supply change per hour | 1.3 °C | 1.9 °C |
+
+Horizon: 9 h gives the same result as 6 h, while 3–4 h is worse (12–13 % outside).
 
 ## Why
 
