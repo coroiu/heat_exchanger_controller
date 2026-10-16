@@ -10,6 +10,7 @@ from homeassistant.const import UnitOfIrradiance, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import HeatExchangerRuntimeData
 from .climate import _device_info, _room_device_info, _room_subentries
@@ -44,6 +45,7 @@ async def async_setup_entry(
             PumpStateSensor(entry, runtime.inner),
             SmhiForecastSensor(entry, runtime.outer),
             PlannedIndoorTempSensor(entry, runtime.outer),
+            HourProfileSensor(entry, runtime.outer),
         ]
     )
     rooms = _room_subentries(entry)
@@ -175,6 +177,42 @@ class PredictedIndoorTempSensor(_OuterSensor):
             return None
         v = self.coordinator.data.predicted_indoor_temp
         return round(v, 2) if v is not None else None
+
+
+class HourProfileSensor(_OuterSensor):
+    """Hour-of-day model correction for the current hour (°C/h); the full profile in attributes."""
+
+    _attr_translation_key = "hour_profile"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "°C/h"
+    _attr_icon = "mdi:clock-time-eight-outline"
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_hour_profile"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return round(self.coordinator.data.hour_profile[dt_util.now().hour], 3)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        return {
+            "profile": {f"{h:02d}": round(v, 3) for h, v in enumerate(data.hour_profile)},
+            "enabled": data.hour_profile_enabled,
+            "updates": data.hour_profile_updates,
+            "last_hour": data.hour_profile_last_hour,
+            "last_residual": (
+                round(data.hour_profile_last_residual, 3)
+                if data.hour_profile_last_residual is not None
+                else None
+            ),
+        }
 
 
 class OutdoorTempSourceSensor(_OuterSensor):

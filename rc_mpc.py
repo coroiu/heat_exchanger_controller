@@ -24,6 +24,7 @@ def compute_supply_setpoint(
     supply_max: float,
     prediction_supply: float | None = None,
     dt_hours: float = 1.0,
+    extra: list[float] | None = None,
 ) -> tuple[float, float]:
     """Return (supply_setpoint, predicted_t_in_at_horizon).
 
@@ -38,6 +39,8 @@ def compute_supply_setpoint(
         g: Solar aperture (m²).
         supply_min: Minimum allowed supply temperature (°C).
         supply_max: Maximum allowed supply temperature (°C).
+        extra: Optional per-step temperature change (°C) added to the disturbance,
+            e.g. the hour-of-day profile. Used by both the solve and the prediction.
     """
     N = len(outdoor_temps)
     if N == 0:
@@ -49,6 +52,8 @@ def compute_supply_setpoint(
 
     # Disturbance per step: contribution from solar gain + outdoor temp, scaled by dt
     d = [(g * solar_irradiance[k] + outdoor_temps[k] / R) / C * dt_hours for k in range(N)]
+    if extra is not None:
+        d = [d[k] + extra[k] for k in range(N)]
 
     # Protect against degenerate parameters
     if abs(b) < 1e-9 or abs(a) < 1e-9:

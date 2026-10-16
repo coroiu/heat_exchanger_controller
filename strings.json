@@ -194,6 +194,9 @@
       },
       "room_planned_temp": {
         "name": "Planned temp"
+      },
+      "hour_profile": {
+        "name": "Hour-of-day correction"
       }
     },
     "number": {
@@ -281,6 +284,9 @@
       },
       "scoring_paused": {
         "name": "Room scoring paused"
+      },
+      "hour_profile": {
+        "name": "Hour-of-day correction"
       }
     },
     "binary_sensor": {

@@ -17,6 +17,7 @@ from homeassistant.exceptions import ServiceNotFound
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_DISTURBANCE_ALPHA,
@@ -87,6 +88,7 @@ from .const import (
     STATUS_OK,
     STATUS_STARTING,
 )
+from .hour_profile import HourProfile
 from .pid import SimplePID
 from .rc_mpc import compute_supply_setpoint, model_inputs
 from .path_mpc import PathResult, PathRoom, plan_supply
@@ -121,6 +123,12 @@ class OuterData:
     # False until the MPC has produced at least one setpoint (e.g. sensors not yet
     # loaded right after a restart); supply_setpoint is then only a placeholder
     setpoint_valid: bool = True
+    # --- Hour-of-day profile (live: applied to the MPC when enabled) ---
+    hour_profile: list[float] = field(default_factory=lambda: [0.0] * 24)
+    hour_profile_enabled: bool = True
+    hour_profile_updates: int = 0
+    hour_profile_last_residual: float | None = None
+    hour_profile_last_hour: int | None = None
     # --- Rooms (shadow mode; never read by the live control path) ---
     # subentry_id → result, or None when the room's sensor is unavailable
     rooms: dict[str, RoomResult | None] = field(default_factory=dict)
@@ -190,12 +198,22 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._path_inputs: dict[str, float] = {}
         self._path_warm: dict[str, tuple[datetime, list[float]]] = {}
         self._rooms_store: Store[dict[str, dict]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.rooms")
+        # Hour-of-day profile: learned every hour, applied to the MPC unless switched off
+        self._profile = HourProfile()
+        self._profile_enabled: bool = True
+        self._profile_store: Store[dict] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.profile")
 
     async def async_load_state(self) -> None:
         """Restore d_hat persisted by the previous run (falls back to the options value)."""
         stored = await self._store.async_load()
         if stored and "d_hat" in stored:
             self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, float(stored["d_hat"])))
+        profile = await self._profile_store.async_load()
+        if profile:
+            try:
+                self._profile.load_dict(profile)
+            except (TypeError, ValueError, KeyError) as err:
+                _LOGGER.warning("Ignoring stored hour profile: %s", err)
         rooms = await self._rooms_store.async_load() or {}
         for sid, model in self._rooms.items():
             if sid in rooms:
@@ -214,6 +232,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
     async def async_flush_state(self) -> None:
         """Write d_hat immediately so a reload picks up the latest value."""
         await self._store.async_save({"d_hat": self._d_hat})
+        await self._profile_store.async_save(self._profile.to_dict())
         if self._rooms:
             await self._rooms_store.async_save(self._rooms_state())
 
@@ -223,6 +242,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
 
     def set_scoring_paused(self, paused: bool) -> None:
         self._scoring_paused = paused
+
+    def set_profile_enabled(self, enabled: bool) -> None:
+        self._profile_enabled = enabled
 
     def set_path_input(self, key: str, value: float) -> None:
         self._path_inputs[key] = value
@@ -381,6 +403,13 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 shadow_faults.append("path_mpc_error")
         shadow["shadow_faults"] = shadow_faults
 
+        # --- Hour-of-day profile: learn from the hour that just ended ---
+        # Paused while room scoring is paused or a window is suspected, so one-off
+        # events don't land in a slot.
+        self._learn_profile(indoor_temp, outdoor_temp, solar_now, not (
+            self._scoring_paused or shadow.get("window_suspected", False)
+        ))
+
         return OuterData(
             supply_setpoint=supply_setpoint,
             predicted_indoor_temp=predicted_corrected,
@@ -396,6 +425,11 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             smhi_forecast=smhi_outdoor_forecast,
             disturbance_estimate=self._d_hat,
             setpoint_valid=self._has_valid_setpoint,
+            hour_profile=list(self._profile.q),
+            hour_profile_enabled=self._profile_enabled,
+            hour_profile_updates=self._profile.updates,
+            hour_profile_last_residual=self._profile.last_residual,
+            hour_profile_last_hour=self._profile.last_hour,
             **shadow,
         )
 
@@ -744,8 +778,20 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             horizon_h, smhi_forecast, solar_forecast, outdoor_temp
         )
 
-        # When pump is off, no heat is delivered — simulate with T_indoor as effective supply
-        pump_off = self._pump_off()
+        # The prediction simulates the supply the house actually gets, not the setpoint
+        # (simulating the setpoint just lands on target by construction). Pump off: no
+        # heat, so T_indoor as effective supply. Pump on: the measured supply line, held
+        # for the horizon; falls back to the setpoint if the sensor is unavailable.
+        if self._pump_off():
+            prediction_supply = t_in
+        else:
+            prediction_supply = self._measured_supply()
+
+        extra = (
+            self._profile.corrections(dt_util.now(), len(model_outdoor), dt_hours)
+            if self._profile_enabled
+            else None
+        )
 
         try:
             setpoint, predicted = compute_supply_setpoint(
@@ -759,8 +805,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 g=g,
                 supply_min=supply_min,
                 supply_max=supply_max,
-                prediction_supply=t_in if pump_off else None,
+                prediction_supply=prediction_supply,
                 dt_hours=dt_hours,
+                extra=extra,
             )
             self._last_supply_setpoint = setpoint
             self._has_valid_setpoint = True
@@ -776,6 +823,25 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             and self._inner.data is not None
             and self._inner.data.pump_state == "off"
         )
+
+    def _learn_profile(
+        self, indoor_temp: float | None, outdoor_temp: float | None, solar: float | None, learn: bool
+    ) -> None:
+        # Effective supply as the model sees it: room temperature with the pump off
+        supply = indoor_temp if self._pump_off() else self._measured_supply()
+        rc = (
+            float(self._opt(CONF_RC_UA, DEFAULT_RC_UA)),
+            float(self._opt(CONF_RC_R, DEFAULT_RC_R)),
+            float(self._opt(CONF_RC_G, DEFAULT_RC_G)),
+            float(self._opt(CONF_RC_C, DEFAULT_RC_C)),
+        )
+        if self._profile.observe(dt_util.now(), indoor_temp, supply, outdoor_temp, solar, rc, learn):
+            self._profile_store.async_delay_save(self._profile.to_dict, _STATE_SAVE_DELAY)
+
+    def _measured_supply(self) -> float | None:
+        if self._inner is None or self._inner.data is None:
+            return None
+        return self._inner.data.current_supply_temp
 
 
 class InnerCoordinator(DataUpdateCoordinator[InnerData]):
