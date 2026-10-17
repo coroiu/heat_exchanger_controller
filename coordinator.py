@@ -778,14 +778,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             horizon_h, smhi_forecast, solar_forecast, outdoor_temp
         )
 
-        # The prediction simulates the supply the house actually gets, not the setpoint
-        # (simulating the setpoint just lands on target by construction). Pump off: no
-        # heat, so T_indoor as effective supply. Pump on: the measured supply line, held
-        # for the horizon; falls back to the setpoint if the sensor is unavailable.
-        if self._pump_off():
-            prediction_supply = t_in
-        else:
-            prediction_supply = self._measured_supply()
+        # When pump is off, no heat is delivered — simulate with T_indoor as effective supply
+        pump_off = self._pump_off()
 
         extra = (
             self._profile.corrections(dt_util.now(), len(model_outdoor), dt_hours)
@@ -805,7 +799,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 g=g,
                 supply_min=supply_min,
                 supply_max=supply_max,
-                prediction_supply=prediction_supply,
+                prediction_supply=t_in if pump_off else None,
                 dt_hours=dt_hours,
                 extra=extra,
             )
