@@ -27,6 +27,11 @@ RESIDUAL_CLIP = 0.4  # °C/h
 MIN_SAMPLES = 8
 MIN_ELAPSED_H = 50 / 60
 MAX_ELAPSED_H = 75 / 60
+# Evening ramp → night → morning ramp (local hours). Here the profile may only take heat
+# away (q ≥ 0 applied, q < 0 ignored): the bedroom must not be pre-heated while people
+# sleep, and the 09/19 slots mostly learn the steering sensor's room blend, not physics.
+# Night 2026-10-16/17: the negative 04–09 slots pushed supply to ~40 and the bedroom to 22.6.
+REDUCE_ONLY_HOURS = frozenset({19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9})
 
 
 @dataclass
@@ -104,11 +109,18 @@ class HourProfile:
         return True
 
     def corrections(self, start_local: datetime, n_steps: int, dt_hours: float) -> list[float]:
-        """Per-step extra temperature change (°C) for the model, by the hour of each step's midpoint."""
-        return [
-            self.q[(start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour] * dt_hours
-            for k in range(n_steps)
-        ]
+        """Per-step extra temperature change (°C) for the model, by the hour of each step's midpoint.
+
+        In REDUCE_ONLY_HOURS a negative slot (house loses heat → more supply) is ignored.
+        """
+        out = []
+        for k in range(n_steps):
+            hour = (start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour
+            q = self.q[hour]
+            if hour in REDUCE_ONLY_HOURS:
+                q = max(q, 0.0)
+            out.append(q * dt_hours)
+        return out
 
     def to_dict(self) -> dict:
         return {"q": list(self.q), "updates": self.updates}
