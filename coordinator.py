@@ -53,6 +53,7 @@ from .const import (
     DEFAULT_BOOST_TRIGGER_SPAN,
     DEFAULT_DISTURBANCE_ALPHA,
     DEFAULT_DISTURBANCE_ESTIMATE,
+    DISTURBANCE_LEAK_TAU_H,
     DISTURBANCE_MAX,
     DEFAULT_HVAC_MODE,
     DEFAULT_MIN_PUMP_ON_DURATION,
@@ -186,6 +187,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._open_meteo_cache_time: datetime | None = None
         self._d_hat: float = float(entry.options.get(CONF_DISTURBANCE_ESTIMATE, DEFAULT_DISTURBANCE_ESTIMATE))
         self._indoor_history: deque[tuple[datetime, float]] = deque()
+        self._observer_last_ts: datetime | None = None
         self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
         self._inner: "InnerCoordinator | None" = None  # set by __init__.py after both are created
         # Rooms (shadow mode), one model per room subentry
@@ -338,13 +340,21 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 and trend * indoor_error < 0
                 and abs(trend) * horizon_h >= abs(indoor_error)
             )
-            if not saturated and not recovering:
-                alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
-                # Integrate (not low-pass) so any persistent offset keeps growing d_hat until
-                # indoor reaches target; (1 - alpha) is the gain per outer tick, so alpha = 1 freezes it.
-                self._d_hat += (1.0 - alpha) * (-indoor_error)
+            alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
+            now_utc = datetime.now(timezone.utc)
+            if alpha < 1.0:
+                # Leak toward 0 (by elapsed time, also while the update is frozen) so a value
+                # learned under other conditions (a cold morning) can't linger into a sunny
+                # afternoon. Persistent bias belongs to the hour profile and refits.
+                if self._observer_last_ts is not None:
+                    elapsed_h = min((now_utc - self._observer_last_ts).total_seconds() / 3600.0, 1.0)
+                    self._d_hat *= math.exp(-elapsed_h / DISTURBANCE_LEAK_TAU_H)
+                if not saturated and not recovering:
+                    # (1 - alpha) is the gain per outer tick; alpha = 1 freezes d_hat (no leak either)
+                    self._d_hat += (1.0 - alpha) * (-indoor_error)
                 self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, self._d_hat))
                 self._save_state()
+            self._observer_last_ts = now_utc
 
         # Solver targets (target + d_hat) so the house actually lands on target
         effective_target = target_temp + self._d_hat

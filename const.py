@@ -84,6 +84,9 @@ DEFAULT_DISTURBANCE_ALPHA = 0.95
 DEFAULT_DISTURBANCE_ESTIMATE = 0.0
 # Hard cap on the observer's target shift (°C); ±1.5 was still too much if it wound up
 DISTURBANCE_MAX = 0.5
+# Observer leak time constant (h): d_hat decays toward 0 so it only carries recent error.
+# Not offset-free any more: at α 0.95 / 5 min ticks it removes ~65 % of a steady offset.
+DISTURBANCE_LEAK_TAU_H = 3.0
 DEFAULT_PUMP_OFF_THRESHOLD = 100.0  # above normal output range → feature disabled by default
 DEFAULT_MIN_PUMP_ON_DURATION = 20  # minutes
 DEFAULT_BOOST_TRIGGER_SPAN = 0.3  # °C below target that triggers a preventive boost
