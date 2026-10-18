@@ -102,6 +102,8 @@ _OPEN_METEO_CACHE_SECONDS = 900
 
 # Indoor trend for the observer's transient freeze is measured over this window
 _INDOOR_TREND_WINDOW = timedelta(minutes=30)
+# Window for the actual-vs-model indoor rate diagnostics
+_RATE_WINDOW = timedelta(minutes=60)
 # Observer state is written at most this often; HA flushes pending writes on shutdown
 _STATE_SAVE_DELAY = 60
 
@@ -130,6 +132,11 @@ class OuterData:
     hour_profile_updates: int = 0
     hour_profile_last_residual: float | None = None
     hour_profile_last_hour: int | None = None
+    # --- Indoor rate diagnostics (°C/h, mean over _RATE_WINDOW; None until the window fills) ---
+    indoor_rate_actual: float | None = None
+    indoor_rate_model: float | None = None  # physics + applied profile slot
+    indoor_rate_physics: float | None = None  # RC model only
+    indoor_rate_profile: float | None = None  # applied profile slot
     # --- Rooms (shadow mode; never read by the live control path) ---
     # subentry_id → result, or None when the room's sensor is unavailable
     rooms: dict[str, RoomResult | None] = field(default_factory=dict)
@@ -188,6 +195,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._d_hat: float = float(entry.options.get(CONF_DISTURBANCE_ESTIMATE, DEFAULT_DISTURBANCE_ESTIMATE))
         self._indoor_history: deque[tuple[datetime, float]] = deque()
         self._observer_last_ts: datetime | None = None
+        # (time, indoor, physics rate, applied profile rate) per outer tick
+        self._rate_samples: deque[tuple[datetime, float, float, float]] = deque()
         self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
         self._inner: "InnerCoordinator | None" = None  # set by __init__.py after both are created
         # Rooms (shadow mode), one model per room subentry
@@ -420,6 +429,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             self._scoring_paused or shadow.get("window_suspected", False)
         ))
 
+        rates = self._indoor_rates(indoor_temp, outdoor_temp, solar_now)
+
         return OuterData(
             supply_setpoint=supply_setpoint,
             predicted_indoor_temp=predicted_corrected,
@@ -440,6 +451,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             hour_profile_updates=self._profile.updates,
             hour_profile_last_residual=self._profile.last_residual,
             hour_profile_last_hour=self._profile.last_hour,
+            **rates,
             **shadow,
         )
 
@@ -863,6 +875,51 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         )
         if self._profile.observe(dt_util.now(), indoor_temp, supply, outdoor_temp, solar, rc, learn):
             self._profile_store.async_delay_save(self._profile.to_dict, _STATE_SAVE_DELAY)
+
+    def _indoor_rates(
+        self, indoor_temp: float | None, outdoor_temp: float | None, solar: float | None
+    ) -> dict[str, float | None]:
+        """How fast indoor actually moves vs how fast the model says it should (°C/h).
+
+        The model rate is evaluated each tick from the current indoor, effective supply
+        (indoor when the pump is off), outdoor and current-hour solar, plus the profile slot
+        as the MPC applies it, and averaged over the window; the actual rate is the indoor
+        slope over the same window.
+        """
+        now = datetime.now(timezone.utc)
+        supply = indoor_temp if self._pump_off() else self._measured_supply()
+        if indoor_temp is not None and outdoor_temp is not None and supply is not None:
+            ua = float(self._opt(CONF_RC_UA, DEFAULT_RC_UA))
+            r_env = float(self._opt(CONF_RC_R, DEFAULT_RC_R))
+            g = float(self._opt(CONF_RC_G, DEFAULT_RC_G))
+            c = float(self._opt(CONF_RC_C, DEFAULT_RC_C))
+            physics = (
+                ua * (supply - indoor_temp) + (outdoor_temp - indoor_temp) / r_env + g * (solar or 0.0)
+            ) / c
+            profile = self._profile.applied(dt_util.now().hour) if self._profile_enabled else 0.0
+            self._rate_samples.append((now, indoor_temp, physics, profile))
+        while self._rate_samples and now - self._rate_samples[0][0] > _RATE_WINDOW:
+            self._rate_samples.popleft()
+        empty = {
+            "indoor_rate_actual": None,
+            "indoor_rate_model": None,
+            "indoor_rate_physics": None,
+            "indoor_rate_profile": None,
+        }
+        if len(self._rate_samples) < 2:
+            return empty
+        span_h = (self._rate_samples[-1][0] - self._rate_samples[0][0]).total_seconds() / 3600.0
+        if span_h < _RATE_WINDOW.total_seconds() / 3600.0 * 0.66:
+            return empty
+        n = len(self._rate_samples)
+        physics = sum(x[2] for x in self._rate_samples) / n
+        profile = sum(x[3] for x in self._rate_samples) / n
+        return {
+            "indoor_rate_actual": (self._rate_samples[-1][1] - self._rate_samples[0][1]) / span_h,
+            "indoor_rate_model": physics + profile,
+            "indoor_rate_physics": physics,
+            "indoor_rate_profile": profile,
+        }
 
     def _measured_supply(self) -> float | None:
         if self._inner is None or self._inner.data is None:

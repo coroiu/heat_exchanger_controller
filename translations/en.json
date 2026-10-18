@@ -197,6 +197,15 @@
       },
       "hour_profile": {
         "name": "Hour-of-day correction"
+      },
+      "indoor_rate_actual": {
+        "name": "Indoor rate actual"
+      },
+      "indoor_rate_model": {
+        "name": "Indoor rate model"
+      },
+      "model_mismatch_rate": {
+        "name": "Model mismatch rate"
       }
     },
     "number": {

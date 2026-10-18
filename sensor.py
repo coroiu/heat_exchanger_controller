@@ -15,7 +15,7 @@ from homeassistant.util import dt as dt_util
 from . import HeatExchangerRuntimeData
 from .climate import _device_info, _room_device_info, _room_subentries
 from .const import DOMAIN
-from .coordinator import InnerCoordinator, OuterCoordinator
+from .coordinator import InnerCoordinator, OuterCoordinator, OuterData
 from .path_mpc import PathResult
 from .room_model import RoomResult
 
@@ -46,6 +46,9 @@ async def async_setup_entry(
             SmhiForecastSensor(entry, runtime.outer),
             PlannedIndoorTempSensor(entry, runtime.outer),
             HourProfileSensor(entry, runtime.outer),
+            IndoorRateActualSensor(entry, runtime.outer),
+            IndoorRateModelSensor(entry, runtime.outer),
+            ModelMismatchRateSensor(entry, runtime.outer),
         ]
     )
     rooms = _room_subentries(entry)
@@ -213,6 +216,61 @@ class HourProfileSensor(_OuterSensor):
                 else None
             ),
         }
+
+
+class _IndoorRateSensor(_OuterSensor):
+    """Indoor rate diagnostics (°C/h) over the last hour; see OuterCoordinator._indoor_rates."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "°C/h"
+    _attr_icon = "mdi:chart-line-variant"
+    _key: str
+
+    def __init__(self, entry: ConfigEntry, coordinator: OuterCoordinator) -> None:
+        super().__init__(entry, coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_{self._key}"
+
+    def _value(self, data: OuterData) -> float | None:
+        return getattr(data, self._key)
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        v = self._value(self.coordinator.data)
+        return round(v, 3) if v is not None else None
+
+
+class IndoorRateActualSensor(_IndoorRateSensor):
+    _attr_translation_key = "indoor_rate_actual"
+    _key = "indoor_rate_actual"
+
+
+class IndoorRateModelSensor(_IndoorRateSensor):
+    _attr_translation_key = "indoor_rate_model"
+    _key = "indoor_rate_model"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None or data.indoor_rate_physics is None:
+            return {}
+        return {
+            "physics": round(data.indoor_rate_physics, 3),
+            "profile": round(data.indoor_rate_profile, 3),
+        }
+
+
+class ModelMismatchRateSensor(_IndoorRateSensor):
+    """Actual − model rate: unmodelled heat (+ = house warming faster than the model expects)."""
+
+    _attr_translation_key = "model_mismatch_rate"
+    _key = "model_mismatch_rate"
+
+    def _value(self, data: OuterData) -> float | None:
+        if data.indoor_rate_actual is None or data.indoor_rate_model is None:
+            return None
+        return data.indoor_rate_actual - data.indoor_rate_model
 
 
 class OutdoorTempSourceSensor(_OuterSensor):

@@ -113,14 +113,15 @@ class HourProfile:
 
         In REDUCE_ONLY_HOURS a negative slot (house loses heat → more supply) is ignored.
         """
-        out = []
-        for k in range(n_steps):
-            hour = (start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour
-            q = self.q[hour]
-            if hour in REDUCE_ONLY_HOURS:
-                q = max(q, 0.0)
-            out.append(q * dt_hours)
-        return out
+        return [
+            self.applied((start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour) * dt_hours
+            for k in range(n_steps)
+        ]
+
+    def applied(self, hour: int) -> float:
+        """The slot's q as the MPC applies it (°C/h): negative slots are ignored in REDUCE_ONLY_HOURS."""
+        q = self.q[hour]
+        return max(q, 0.0) if hour in REDUCE_ONLY_HOURS else q
 
     def to_dict(self) -> dict:
         return {"q": list(self.q), "updates": self.updates}
