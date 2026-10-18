@@ -54,7 +54,10 @@ from .const import (
     DEFAULT_DISTURBANCE_ALPHA,
     DEFAULT_DISTURBANCE_ESTIMATE,
     DISTURBANCE_LEAK_TAU_H,
-    DISTURBANCE_MAX,
+    CONF_DISTURBANCE_MAX,
+    CONF_OBSERVER_NO_HEAT_MARGIN,
+    DEFAULT_DISTURBANCE_MAX,
+    DEFAULT_OBSERVER_NO_HEAT_MARGIN,
     DEFAULT_HVAC_MODE,
     DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTPUT_MAX,
@@ -221,7 +224,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         """Restore d_hat persisted by the previous run (falls back to the options value)."""
         stored = await self._store.async_load()
         if stored and "d_hat" in stored:
-            self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, float(stored["d_hat"])))
+            self._d_hat = self._clamp_d_hat(float(stored["d_hat"]))
         profile = await self._profile_store.async_load()
         if profile:
             try:
@@ -237,8 +240,12 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                     _LOGGER.warning("Ignoring stored state for room %s: %s", sid, err)
 
     def set_disturbance_estimate(self, value: float) -> None:
-        self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, value))
+        self._d_hat = self._clamp_d_hat(value)
         self._save_state()
+
+    def _clamp_d_hat(self, value: float) -> float:
+        cap = float(self._opt(CONF_DISTURBANCE_MAX, DEFAULT_DISTURBANCE_MAX))
+        return max(-cap, min(cap, value))
 
     def _save_state(self) -> None:
         self._store.async_delay_save(lambda: {"d_hat": self._d_hat}, _STATE_SAVE_DELAY)
@@ -336,7 +343,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             indoor_error = indoor_temp - target_temp  # positive = warm, negative = cold
             # Anti-windup: when the actuator can't go further in the direction d_hat would
             # push, freeze the update. Allows recovery once the error reverses.
-            no_less_heat, no_more_heat = self._actuator_saturation()
+            no_less_heat, no_more_heat = self._actuator_saturation(indoor_temp)
             saturated = (no_less_heat and indoor_error > 0) or (no_more_heat and indoor_error < 0)
             # Transient freeze: if indoor is already heading toward target fast enough to get
             # there within the horizon, the error is a recovery in progress, not model bias.
@@ -361,7 +368,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 if not saturated and not recovering:
                     # (1 - alpha) is the gain per outer tick; alpha = 1 freezes d_hat (no leak either)
                     self._d_hat += (1.0 - alpha) * (-indoor_error)
-                self._d_hat = max(-DISTURBANCE_MAX, min(DISTURBANCE_MAX, self._d_hat))
+                self._d_hat = self._clamp_d_hat(self._d_hat)
                 self._save_state()
             self._observer_last_ts = now_utc
 
@@ -833,25 +840,31 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             faults.append(f"mpc_error: {err}")
             return self._last_supply_setpoint, None
 
-    def _actuator_saturation(self) -> tuple[bool, bool]:
+    def _actuator_saturation(self, indoor_temp: float) -> tuple[bool, bool]:
         """(no less heat possible, no more heat possible), from the inner loop's request.
 
         Lower potentiometer = more heat. A request at or above pump_off_threshold means no
         heat (the pump stops, or will once its min run time is up), so the room can't be
         cooled further; a request at output_min is full heat. Falls back to the supply
         setpoint limits when the inner PID isn't running.
+
+        A supply setpoint less than observer_no_heat_margin above indoor also counts as
+        no heat: the radiators then deliver a small fraction of the losses, and a lower
+        target only pushes the setpoint further below what has any effect.
         """
+        margin = float(self._opt(CONF_OBSERVER_NO_HEAT_MARGIN, DEFAULT_OBSERVER_NO_HEAT_MARGIN))
+        no_heat = self._has_valid_setpoint and self._last_supply_setpoint - indoor_temp < margin
         inner = self._inner.data if self._inner is not None else None
         request = inner.potentiometer_request if inner is not None else None
         if request is not None:
             threshold = float(self._opt(CONF_PUMP_OFF_THRESHOLD, DEFAULT_PUMP_OFF_THRESHOLD))
             out_min = float(self._opt(CONF_OUTPUT_MIN, DEFAULT_OUTPUT_MIN))
             out_max = float(self._opt(CONF_OUTPUT_MAX, DEFAULT_OUTPUT_MAX))
-            return request >= min(threshold, out_max) - 0.5, request <= out_min + 0.5
+            return no_heat or request >= min(threshold, out_max) - 0.5, request <= out_min + 0.5
         supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
         supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
         return (
-            self._last_supply_setpoint <= supply_min + 0.5,
+            no_heat or self._last_supply_setpoint <= supply_min + 0.5,
             self._last_supply_setpoint >= supply_max - 0.5,
         )
 

@@ -60,6 +60,8 @@ RELOAD_ON_CHANGE_KEYS = {
 # --- Defaults ---
 CONF_DISTURBANCE_ALPHA = "disturbance_alpha"
 CONF_DISTURBANCE_ESTIMATE = "disturbance_estimate"
+CONF_DISTURBANCE_MAX = "disturbance_max"
+CONF_OBSERVER_NO_HEAT_MARGIN = "observer_no_heat_margin"
 
 DEFAULT_RC_R = 0.05
 DEFAULT_RC_C = 500.0
@@ -82,8 +84,13 @@ DEFAULT_HVAC_MODE = "heat"
 DEFAULT_DRY_RUN = True
 DEFAULT_DISTURBANCE_ALPHA = 0.95
 DEFAULT_DISTURBANCE_ESTIMATE = 0.0
-# Hard cap on the observer's target shift (°C); ±1.5 was still too much if it wound up
-DISTURBANCE_MAX = 0.5
+# Cap on the observer's target shift (°C), configurable; ±1.5 was too much if it wound up
+DEFAULT_DISTURBANCE_MAX = 0.3
+DISTURBANCE_MAX_LIMIT = 1.5  # upper bound of the configurable cap
+# Observer anti-windup: a supply setpoint less than this above indoor counts as "no heat",
+# so d_hat stops going more negative. 2026-10-18: setpoint 24–29 at indoor 22.6 for 3 h
+# (pot 20–24, under the pump-off line) wound d_hat to −0.35 for no physical effect.
+DEFAULT_OBSERVER_NO_HEAT_MARGIN = 5.0
 # Observer leak time constant (h): d_hat decays toward 0 so it only carries recent error.
 # Not offset-free any more: at α 0.95 / 5 min ticks it removes ~65 % of a steady offset.
 DISTURBANCE_LEAK_TAU_H = 3.0

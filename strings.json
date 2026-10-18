@@ -263,6 +263,12 @@
       "disturbance_estimate": {
         "name": "Disturbance estimate"
       },
+      "disturbance_max": {
+        "name": "Disturbance estimate cap"
+      },
+      "observer_no_heat_margin": {
+        "name": "Observer no-heat margin"
+      },
       "boost_trigger_span": {
         "name": "Boost trigger span"
       },

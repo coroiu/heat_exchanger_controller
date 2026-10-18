@@ -41,7 +41,11 @@ from .const import (
     CONF_OUTPUT_MAX,
     DEFAULT_BOOST_TRIGGER_SPAN,
     DEFAULT_DISTURBANCE_ALPHA,
-    DISTURBANCE_MAX,
+    CONF_DISTURBANCE_MAX,
+    CONF_OBSERVER_NO_HEAT_MARGIN,
+    DEFAULT_DISTURBANCE_MAX,
+    DEFAULT_OBSERVER_NO_HEAT_MARGIN,
+    DISTURBANCE_MAX_LIMIT,
     DEFAULT_INNER_INTERVAL,
     DEFAULT_MIN_PUMP_ON_DURATION,
     DEFAULT_OUTER_INTERVAL,
@@ -187,6 +191,22 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
         mode=NumberMode.BOX,
     ),
     HeatExchangerNumberDescription(
+        key="disturbance_max", translation_key="disturbance_max",
+        conf_key=CONF_DISTURBANCE_MAX, default=DEFAULT_DISTURBANCE_MAX,
+        native_min_value=0.0, native_max_value=DISTURBANCE_MAX_LIMIT, native_step=0.05,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="observer_no_heat_margin", translation_key="observer_no_heat_margin",
+        conf_key=CONF_OBSERVER_NO_HEAT_MARGIN, default=DEFAULT_OBSERVER_NO_HEAT_MARGIN,
+        native_min_value=0.0, native_max_value=20.0, native_step=0.5,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
         key="boost_trigger_span", translation_key="boost_trigger_span",
         conf_key=CONF_BOOST_TRIGGER_SPAN, default=DEFAULT_BOOST_TRIGGER_SPAN,
         native_min_value=0.0, native_max_value=5.0, native_step=0.1,
@@ -296,8 +316,8 @@ class DisturbanceEstimateNumber(CoordinatorEntity[OuterCoordinator], NumberEntit
 
     _attr_has_entity_name = True
     _attr_translation_key = "disturbance_estimate"
-    _attr_native_min_value = -DISTURBANCE_MAX
-    _attr_native_max_value = DISTURBANCE_MAX
+    _attr_native_min_value = -DISTURBANCE_MAX_LIMIT  # the coordinator clamps to the configured cap
+    _attr_native_max_value = DISTURBANCE_MAX_LIMIT
     _attr_native_step = 0.1
     _attr_mode = NumberMode.BOX
     _attr_device_class = NumberDeviceClass.TEMPERATURE
