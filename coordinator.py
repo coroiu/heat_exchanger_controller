@@ -158,6 +158,9 @@ class InnerData:
     pid_p_term: float | None = None
     pid_i_term: float | None = None
     pid_d_term: float | None = None
+    # PID output before pump protection (only in "pid" mode): what the inner loop wants,
+    # without the min-run-time cap that keeps the pump on
+    potentiometer_request: float | None = None
 
 
 class OuterCoordinator(DataUpdateCoordinator[OuterData]):
@@ -320,13 +323,10 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         hvac_mode = self._entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
         if hvac_mode == "heat" and indoor_temp is not None:
             indoor_error = indoor_temp - target_temp  # positive = warm, negative = cold
-            # Anti-windup: when supply setpoint is saturated and the error would push d_hat
-            # further into saturation, freeze the update. Allows recovery once the error reverses.
-            supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
-            supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
-            at_min = self._last_supply_setpoint <= supply_min + 0.5
-            at_max = self._last_supply_setpoint >= supply_max - 0.5
-            saturated = (at_min and indoor_error > 0) or (at_max and indoor_error < 0)
+            # Anti-windup: when the actuator can't go further in the direction d_hat would
+            # push, freeze the update. Allows recovery once the error reverses.
+            no_less_heat, no_more_heat = self._actuator_saturation()
+            saturated = (no_less_heat and indoor_error > 0) or (no_more_heat and indoor_error < 0)
             # Transient freeze: if indoor is already heading toward target fast enough to get
             # there within the horizon, the error is a recovery in progress, not model bias.
             # Integrating it winds d_hat up and causes overshoot. A flat or diverging error
@@ -811,6 +811,28 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             faults.append(f"mpc_error: {err}")
             return self._last_supply_setpoint, None
 
+    def _actuator_saturation(self) -> tuple[bool, bool]:
+        """(no less heat possible, no more heat possible), from the inner loop's request.
+
+        Lower potentiometer = more heat. A request at or above pump_off_threshold means no
+        heat (the pump stops, or will once its min run time is up), so the room can't be
+        cooled further; a request at output_min is full heat. Falls back to the supply
+        setpoint limits when the inner PID isn't running.
+        """
+        inner = self._inner.data if self._inner is not None else None
+        request = inner.potentiometer_request if inner is not None else None
+        if request is not None:
+            threshold = float(self._opt(CONF_PUMP_OFF_THRESHOLD, DEFAULT_PUMP_OFF_THRESHOLD))
+            out_min = float(self._opt(CONF_OUTPUT_MIN, DEFAULT_OUTPUT_MIN))
+            out_max = float(self._opt(CONF_OUTPUT_MAX, DEFAULT_OUTPUT_MAX))
+            return request >= min(threshold, out_max) - 0.5, request <= out_min + 0.5
+        supply_min = float(self._opt(CONF_SUPPLY_MIN, DEFAULT_SUPPLY_MIN))
+        supply_max = float(self._opt(CONF_SUPPLY_MAX, DEFAULT_SUPPLY_MAX))
+        return (
+            self._last_supply_setpoint <= supply_min + 0.5,
+            self._last_supply_setpoint >= supply_max - 0.5,
+        )
+
     def _pump_off(self) -> bool:
         return (
             self._inner is not None
@@ -988,6 +1010,7 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
         pid_i: float | None = None
         pid_d: float | None = None
         pump_protection_active = False
+        potentiometer_request: float | None = None
 
         if awaiting_setpoint:
             # No write and no PID step; the preload (if pending) runs on the first real cycle
@@ -1012,6 +1035,7 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             pid_i = self._pid.last_i
             pid_d = self._pid.last_d
             self._maybe_trigger_boost()
+            potentiometer_request = potentiometer_value
             potentiometer_value, pump_protection_active = self._apply_pump_protection(potentiometer_value, now)
             self._last_potentiometer = potentiometer_value
             self._has_valid_output = True
@@ -1033,6 +1057,7 @@ class InnerCoordinator(DataUpdateCoordinator[InnerData]):
             pump_protection_active=pump_protection_active,
             pid_error=pid_error,
             pid_p_term=pid_p,
+            potentiometer_request=potentiometer_request,
             pid_i_term=pid_i,
             pid_d_term=pid_d,
         )

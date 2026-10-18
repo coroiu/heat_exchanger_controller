@@ -82,8 +82,8 @@ DEFAULT_HVAC_MODE = "heat"
 DEFAULT_DRY_RUN = True
 DEFAULT_DISTURBANCE_ALPHA = 0.95
 DEFAULT_DISTURBANCE_ESTIMATE = 0.0
-# Hard cap on the observer's target shift (°C); ±5 could badly over/under-heat if it ran away
-DISTURBANCE_MAX = 1.5
+# Hard cap on the observer's target shift (°C); ±1.5 was still too much if it wound up
+DISTURBANCE_MAX = 0.5
 DEFAULT_PUMP_OFF_THRESHOLD = 100.0  # above normal output range → feature disabled by default
 DEFAULT_MIN_PUMP_ON_DURATION = 20  # minutes
 DEFAULT_BOOST_TRIGGER_SPAN = 0.3  # °C below target that triggers a preventive boost
