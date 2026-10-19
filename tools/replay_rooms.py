@@ -17,10 +17,11 @@ import numpy as np
 from rc_mpc import compute_supply_setpoint, model_inputs
 from room_model import RoomModel, RoomParams, combine
 
-# name: (sensor, UA, R, g) at C = 500 — the 14-day per-room fits of 2026-10-13
+import ha_local
+
+# name: (sensor, UA, R, g) at C = 500, from the integration's room subentries
 ROOMS = {
-    "bedroom": ("sensor.sonoff_sensor_03_temperature", 8.0, 0.0783, 0.14),
-    "living": ("sensor.sonoff_sensor_07_temperature", 9.9, 0.0582, 0.19),
+    title: (d["room_sensor"], d["rc_ua"], d["rc_r"], d["rc_g"]) for title, d in ha_local.rooms()
 }
 C = 500.0
 

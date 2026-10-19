@@ -4,23 +4,28 @@
 Uses hourly means of supply/outdoor/indoor and correctly-aligned Open-Meteo solar
 (step k uses the slot labelled k+1 h). More robust than the one-step OLS in
 estimate_rc.py. Needs numpy + scipy.
-Usage: fit_rc_multistep.py [days=14] [H=3] [indoor_entity=sensor.indoor_steer_temperature]
-Per-room seeds: fit_rc_multistep.py 14 3 sensor.sonoff_sensor_03_temperature
+Usage: fit_rc_multistep.py [days=14] [H=3] [indoor_entity=the integration's indoor sensor]
+Per-room seeds: fit_rc_multistep.py 14 3 sensor.my_room_temperature
 """
 import sys, sqlite3, json, urllib.request
 import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime, timezone
 import numpy as np
 from estimate_rc import fetch_history
-DB="/path/to/ha/config/home-assistant_v2.db"
-DEFAULT_INDOOR="sensor.indoor_steer_temperature"
+import ha_local
+DB=ha_local.db_path()
+DEFAULT_INDOOR=ha_local.indoor_entity()
+LAT,LON=ha_local.location()
 
 def _utc(s): return datetime.fromisoformat(s).timestamp()
 # (start, end) epoch ranges whose indoor data doesn't reflect the heating physics
-# (open windows, fires, ...). Any hour overlapping one is dropped.
-EXCLUDE=[
-    (_utc("2026-10-12T19:30:00+02:00"), _utc("2026-10-12T22:26:00+02:00")),  # window open (closed 21:26, +1 h)
-]
+# (open windows, fires, ...). Any hour overlapping one is dropped. Listed per install in
+# tools/exclude.local.json (gitignored): [["2026-01-01T19:30:00+01:00", "2026-01-01T22:30:00+01:00", "window open"], ...]
+def _load_exclude():
+    p=os.path.join(os.path.dirname(os.path.abspath(__file__)),"exclude.local.json")
+    if not os.path.exists(p): return []
+    return [(_utc(a),_utc(b)) for a,b,*_ in json.load(open(p))]
+EXCLUDE=_load_exclude()
 
 def load_data(days, indoor_entity=DEFAULT_INDOOR):
     """Hourly arrays h, Tin (mean), Tin_p (point at hour start), Tout, Sup, I and the usable mask."""
@@ -35,15 +40,15 @@ def load_data(days, indoor_entity=DEFAULT_INDOOR):
         hours=grid[::12][:len(grid)//12]
         return hours, g[:len(hours)*12].reshape(-1,12).mean(axis=1)
     h, Tin = hourly_mean(indoor_entity)
-    _, Tout = hourly_mean("sensor.aqara_sensor_03_temperature")
-    _, Sup = hourly_mean("sensor.sonoff_sensor_06_temperature")
+    _, Tout = hourly_mean(ha_local.outdoor_entity())
+    _, Sup = hourly_mean(ha_local.supply_entity())
     # Tin at hour boundaries (point) for state
     def point(eid):
         d=fetch_history(conn,eid,start-7200,end); ts=np.array([x[0] for x in d]); v=np.array([x[1] for x in d])
         idx=np.searchsorted(ts,h,side='right')-1; return v[idx]
     Tin_p=point(indoor_entity)
     sd=datetime.fromtimestamp(start-86400,tz=timezone.utc).strftime("%Y-%m-%d"); ed=datetime.fromtimestamp(end,tz=timezone.utc).strftime("%Y-%m-%d")
-    url=f"https://archive-api.open-meteo.com/v1/archive?latitude=LATITUDE&longitude=LONGITUDE&start_date={sd}&end_date={ed}&hourly=shortwave_radiation&timezone=UTC"
+    url=f"https://archive-api.open-meteo.com/v1/archive?latitude={LAT}&longitude={LON}&start_date={sd}&end_date={ed}&hourly=shortwave_radiation&timezone=UTC"
     try:
         p=json.loads(urllib.request.urlopen(url,timeout=30).read())
     except Exception:

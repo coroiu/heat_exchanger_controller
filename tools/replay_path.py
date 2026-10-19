@@ -85,8 +85,11 @@ def unit_checks():
 
 def load(days):
     from fit_rc_multistep import load_data
-    db = load_data(days, "sensor.sonoff_sensor_03_temperature")
-    dl = load_data(days, "sensor.sonoff_sensor_07_temperature")
+    import ha_local
+    # The replay is a two-room plant: the first room subentry plays "bedroom", the second "living"
+    (_, bed), (_, liv) = ha_local.rooms()[:2]
+    db = load_data(days, bed["room_sensor"])
+    dl = load_data(days, liv["room_sensor"])
     assert (db["h"] == dl["h"]).all()
     ok = db["ok"] & dl["ok"]
 

@@ -17,7 +17,7 @@ Usage:
     python3 estimate_rc.py [options]
 
 Examples:
-    # Run with all defaults (entity IDs pre-set for this installation):
+    # Run with all defaults (DB, location and entities from the local HA config):
     python3 estimate_rc.py
 
     # Use a different C assumption and a shorter window:
@@ -41,13 +41,14 @@ except ImportError:
     sys.exit(1)
 
 
-# --- Defaults for this installation ---
-_DB      = "/path/to/ha/config/home-assistant_v2.db"
-_INDOOR  = "sensor.indoor_steer_temperature"
-_OUTDOOR = "sensor.outdoor_steer_temperature"
-_SUPPLY  = "sensor.sonoff_sensor_06_temperature"
-_LAT     = LATITUDE
-_LON     = LONGITUDE
+# --- Defaults from the local HA config (see ha_local.py) ---
+import os; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ha_local
+_DB      = ha_local.db_path()
+_INDOOR  = ha_local.indoor_entity()
+_OUTDOOR = ha_local.outdoor_entity()
+_SUPPLY  = ha_local.supply_entity()
+_LAT, _LON = ha_local.location()
 
 
 def parse_args() -> argparse.Namespace:

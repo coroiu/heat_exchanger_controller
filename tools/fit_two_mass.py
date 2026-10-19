@@ -23,7 +23,10 @@ import numpy as np
 from scipy.optimize import least_squares
 from fit_rc_multistep import load_data
 
-ROOMS = {"bedroom": "sensor.sonoff_sensor_03_temperature", "living": "sensor.sonoff_sensor_07_temperature"}
+import ha_local
+
+# Room sensors from the integration's room subentries
+ROOMS = {title: d["room_sensor"] for title, d in ha_local.rooms()}
 H = 3
 
 
