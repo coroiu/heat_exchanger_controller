@@ -43,6 +43,8 @@ from .const import (
     DEFAULT_DISTURBANCE_ALPHA,
     CONF_DISTURBANCE_MAX,
     CONF_OBSERVER_NO_HEAT_MARGIN,
+    CONF_PROFILE_NO_PREHEAT_END,
+    CONF_PROFILE_NO_PREHEAT_START,
     DEFAULT_DISTURBANCE_MAX,
     DEFAULT_OBSERVER_NO_HEAT_MARGIN,
     DISTURBANCE_MAX_LIMIT,
@@ -75,6 +77,7 @@ from .const import (
     ROOM_INPUT_RAMP,
     ROOM_INPUT_TARGET,
 )
+from .hour_profile import DEFAULT_NO_PREHEAT_END, DEFAULT_NO_PREHEAT_START
 from .coordinator import OuterCoordinator
 
 
@@ -204,6 +207,18 @@ _NUMBERS: tuple[HeatExchangerNumberDescription, ...] = (
         native_min_value=0.0, native_max_value=20.0, native_step=0.5,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=NumberDeviceClass.TEMPERATURE,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="profile_no_preheat_start", translation_key="profile_no_preheat_start",
+        conf_key=CONF_PROFILE_NO_PREHEAT_START, default=DEFAULT_NO_PREHEAT_START,
+        native_min_value=0, native_max_value=23, native_step=1,
+        mode=NumberMode.BOX,
+    ),
+    HeatExchangerNumberDescription(
+        key="profile_no_preheat_end", translation_key="profile_no_preheat_end",
+        conf_key=CONF_PROFILE_NO_PREHEAT_END, default=DEFAULT_NO_PREHEAT_END,
+        native_min_value=0, native_max_value=23, native_step=1,
         mode=NumberMode.BOX,
     ),
     HeatExchangerNumberDescription(

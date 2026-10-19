@@ -27,11 +27,23 @@ RESIDUAL_CLIP = 0.4  # °C/h
 MIN_SAMPLES = 8
 MIN_ELAPSED_H = 50 / 60
 MAX_ELAPSED_H = 75 / 60
-# Evening ramp → night → morning ramp (local hours). Here the profile may only take heat
-# away (q ≥ 0 applied, q < 0 ignored): the bedroom must not be pre-heated while people
-# sleep, and the 09/19 slots mostly learn the steering sensor's room blend, not physics.
-# Night 2026-10-16/17: the negative 04–09 slots pushed supply to ~40 and the bedroom to 22.6.
-REDUCE_ONLY_HOURS = frozenset({19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9})
+# Default no-pre-heat window (local hours, start inclusive, end exclusive), configurable via
+# profile_no_preheat_start / _end. Here the profile may only take heat away (q ≥ 0 applied,
+# q < 0 ignored), so occupied rooms aren't pre-heated while people sleep; extend it over any
+# hours where the steering sensor blends rooms, since those slots learn the blend, not
+# physics. Without it, negative early-morning slots pushed supply to ~40 and overheated
+# the bedroom.
+DEFAULT_NO_PREHEAT_START = 22
+DEFAULT_NO_PREHEAT_END = 7
+
+
+def reduce_only_hours(start: int, end: int) -> frozenset[int]:
+    """Local hours from start (inclusive) to end (exclusive), wrapping midnight; empty if equal."""
+    start, end = int(start) % 24, int(end) % 24
+    return frozenset((start + i) % 24 for i in range((end - start) % 24))
+
+
+REDUCE_ONLY_HOURS = reduce_only_hours(DEFAULT_NO_PREHEAT_START, DEFAULT_NO_PREHEAT_END)
 
 
 @dataclass
@@ -108,20 +120,24 @@ class HourProfile:
         self.last_hour = b.hour
         return True
 
-    def corrections(self, start_local: datetime, n_steps: int, dt_hours: float) -> list[float]:
+    def corrections(
+        self, start_local: datetime, n_steps: int, dt_hours: float,
+        reduce_only: frozenset[int] = REDUCE_ONLY_HOURS,
+    ) -> list[float]:
         """Per-step extra temperature change (°C) for the model, by the hour of each step's midpoint.
 
-        In REDUCE_ONLY_HOURS a negative slot (house loses heat → more supply) is ignored.
+        In the reduce_only hours a negative slot (house loses heat → more supply) is ignored.
         """
         return [
-            self.applied((start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour) * dt_hours
+            self.applied((start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour, reduce_only)
+            * dt_hours
             for k in range(n_steps)
         ]
 
-    def applied(self, hour: int) -> float:
-        """The slot's q as the MPC applies it (°C/h): negative slots are ignored in REDUCE_ONLY_HOURS."""
+    def applied(self, hour: int, reduce_only: frozenset[int] = REDUCE_ONLY_HOURS) -> float:
+        """The slot's q as the MPC applies it (°C/h): negative slots are ignored in reduce_only hours."""
         q = self.q[hour]
-        return max(q, 0.0) if hour in REDUCE_ONLY_HOURS else q
+        return max(q, 0.0) if hour in reduce_only else q
 
     def to_dict(self) -> dict:
         return {"q": list(self.q), "updates": self.updates}

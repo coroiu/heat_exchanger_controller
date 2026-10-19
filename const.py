@@ -62,6 +62,9 @@ CONF_DISTURBANCE_ALPHA = "disturbance_alpha"
 CONF_DISTURBANCE_ESTIMATE = "disturbance_estimate"
 CONF_DISTURBANCE_MAX = "disturbance_max"
 CONF_OBSERVER_NO_HEAT_MARGIN = "observer_no_heat_margin"
+# Hour profile no-pre-heat window (local hours, start inclusive, end exclusive); defaults in hour_profile.py
+CONF_PROFILE_NO_PREHEAT_START = "profile_no_preheat_start"
+CONF_PROFILE_NO_PREHEAT_END = "profile_no_preheat_end"
 
 DEFAULT_RC_R = 0.05
 DEFAULT_RC_C = 500.0

@@ -269,6 +269,12 @@
       "observer_no_heat_margin": {
         "name": "Observer no-heat margin"
       },
+      "profile_no_preheat_start": {
+        "name": "Hour profile: no pre-heat from (hour)"
+      },
+      "profile_no_preheat_end": {
+        "name": "Hour profile: no pre-heat until (hour)"
+      },
       "boost_trigger_span": {
         "name": "Boost trigger span"
       },

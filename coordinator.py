@@ -56,6 +56,8 @@ from .const import (
     DISTURBANCE_LEAK_TAU_H,
     CONF_DISTURBANCE_MAX,
     CONF_OBSERVER_NO_HEAT_MARGIN,
+    CONF_PROFILE_NO_PREHEAT_END,
+    CONF_PROFILE_NO_PREHEAT_START,
     DEFAULT_DISTURBANCE_MAX,
     DEFAULT_OBSERVER_NO_HEAT_MARGIN,
     DEFAULT_HVAC_MODE,
@@ -92,7 +94,12 @@ from .const import (
     STATUS_OK,
     STATUS_STARTING,
 )
-from .hour_profile import HourProfile
+from .hour_profile import (
+    DEFAULT_NO_PREHEAT_END,
+    DEFAULT_NO_PREHEAT_START,
+    HourProfile,
+    reduce_only_hours,
+)
 from .pid import SimplePID
 from .rc_mpc import compute_supply_setpoint, model_inputs
 from .path_mpc import PathResult, PathRoom, plan_supply
@@ -275,6 +282,13 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
 
     def _rooms_state(self) -> dict[str, dict]:
         return {sid: model.to_dict() for sid, model in self._rooms.items()}
+
+    def _profile_reduce_only(self) -> frozenset[int]:
+        """Hours in which the hour profile may only take heat away (the no-pre-heat window)."""
+        return reduce_only_hours(
+            int(self._opt(CONF_PROFILE_NO_PREHEAT_START, DEFAULT_NO_PREHEAT_START)),
+            int(self._opt(CONF_PROFILE_NO_PREHEAT_END, DEFAULT_NO_PREHEAT_END)),
+        )
 
     def _opt(self, key: str, default: Any) -> Any:
         return self._entry.options.get(key, default)
@@ -811,7 +825,9 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         pump_off = self._pump_off()
 
         extra = (
-            self._profile.corrections(dt_util.now(), len(model_outdoor), dt_hours)
+            self._profile.corrections(
+                dt_util.now(), len(model_outdoor), dt_hours, self._profile_reduce_only()
+            )
             if self._profile_enabled
             else None
         )
@@ -909,7 +925,11 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             physics = (
                 ua * (supply - indoor_temp) + (outdoor_temp - indoor_temp) / r_env + g * (solar or 0.0)
             ) / c
-            profile = self._profile.applied(dt_util.now().hour) if self._profile_enabled else 0.0
+            profile = (
+                self._profile.applied(dt_util.now().hour, self._profile_reduce_only())
+                if self._profile_enabled
+                else 0.0
+            )
             self._rate_samples.append((now, indoor_temp, physics, profile))
         while self._rate_samples and now - self._rate_samples[0][0] > _RATE_WINDOW:
             self._rate_samples.popleft()
