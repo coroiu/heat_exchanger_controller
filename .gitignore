@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .claude/
+
+# Install-specific notes, logs and data: kept locally, never published
+CLAUDE.local.md
+private/

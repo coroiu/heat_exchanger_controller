@@ -1,11 +1,13 @@
 {
   "domain": "heat_exchanger_controller",
   "name": "Heat Exchanger Controller",
-  "codeowners": [],
+  "codeowners": ["@coroiu"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "",
+  "documentation": "https://github.com/coroiu/heat_exchanger_controller",
+  "integration_type": "hub",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/coroiu/heat_exchanger_controller/issues",
   "requirements": [],
-  "version": "1.0.0"
+  "version": "0.1.0"
 }
