@@ -18,7 +18,7 @@ and night bias +0.10 → +0.01; β 0.1 learned too slowly, 0.35 overreacted.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 PROFILE_BETA = 0.2
 # One-off events (window, party) shouldn't drag a slot far; normal residuals stay within ±0.25
@@ -105,7 +105,9 @@ class HourProfile:
         return updated
 
     def _finish(self, b: _Bucket, now_local: datetime, t_end: float, rc: tuple[float, float, float, float]) -> bool:
-        elapsed_h = (now_local - b.start).total_seconds() / 3600.0
+        # Real elapsed time: aware datetimes in the same zone subtract as wall clock, so the
+        # repeated hour when DST ends would count as one hour (it's two, and gets dropped)
+        elapsed_h = (now_local.timestamp() - b.start.timestamp()) / 3600.0
         if not b.valid or b.n < MIN_SAMPLES or not MIN_ELAPSED_H <= elapsed_h <= MAX_ELAPSED_H:
             return False
         ua, r_env, g, c = rc
@@ -128,8 +130,12 @@ class HourProfile:
 
         In the reduce_only hours a negative slot (house loses heat → more supply) is ignored.
         """
+        # Step in UTC and convert back, so steps across a DST change land on the right local hour
+        start_utc, tz = start_local.astimezone(timezone.utc), start_local.tzinfo
         return [
-            self.applied((start_local + timedelta(hours=(k + 0.5) * dt_hours)).hour, reduce_only)
+            self.applied(
+                (start_utc + timedelta(hours=(k + 0.5) * dt_hours)).astimezone(tz).hour, reduce_only
+            )
             * dt_hours
             for k in range(n_steps)
         ]
