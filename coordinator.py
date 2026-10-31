@@ -98,6 +98,7 @@ from .hour_profile import (
     DEFAULT_NO_PREHEAT_END,
     DEFAULT_NO_PREHEAT_START,
     HourProfile,
+    advance_expected_effect,
     reduce_only_hours,
 )
 from .pid import SimplePID
@@ -142,6 +143,8 @@ class OuterData:
     hour_profile_updates: int = 0
     hour_profile_last_residual: float | None = None
     hour_profile_last_hour: int | None = None
+    # How far the profile is expected to have moved indoor (°C); the observer subtracts it
+    profile_expected_effect: float = 0.0
     # --- Indoor rate diagnostics (°C/h, mean over _RATE_WINDOW; None until the window fills) ---
     indoor_rate_actual: float | None = None
     indoor_rate_model: float | None = None  # physics + applied profile slot
@@ -205,6 +208,10 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         self._d_hat: float = float(entry.options.get(CONF_DISTURBANCE_ESTIMATE, DEFAULT_DISTURBANCE_ESTIMATE))
         self._indoor_history: deque[tuple[datetime, float]] = deque()
         self._observer_last_ts: datetime | None = None
+        # The profile's expected effect on indoor (°C), and the supply the MPC added for the
+        # profile last tick; the observer subtracts the effect so planned moves aren't bias
+        self._expected_effect: float = 0.0
+        self._profile_supply_delta: float = 0.0
         # (time, indoor, physics rate, applied profile rate) per outer tick
         self._rate_samples: deque[tuple[datetime, float, float, float]] = deque()
         self._store: Store[dict[str, float]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.observer")
@@ -232,6 +239,8 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         stored = await self._store.async_load()
         if stored and "d_hat" in stored:
             self._d_hat = self._clamp_d_hat(float(stored["d_hat"]))
+        if stored and "expected_effect" in stored:
+            self._expected_effect = float(stored["expected_effect"])
         profile = await self._profile_store.async_load()
         if profile:
             try:
@@ -255,11 +264,14 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         return max(-cap, min(cap, value))
 
     def _save_state(self) -> None:
-        self._store.async_delay_save(lambda: {"d_hat": self._d_hat}, _STATE_SAVE_DELAY)
+        self._store.async_delay_save(self._observer_state, _STATE_SAVE_DELAY)
+
+    def _observer_state(self) -> dict[str, float]:
+        return {"d_hat": self._d_hat, "expected_effect": self._expected_effect}
 
     async def async_flush_state(self) -> None:
         """Write d_hat immediately so a reload picks up the latest value."""
-        await self._store.async_save({"d_hat": self._d_hat})
+        await self._store.async_save(self._observer_state())
         await self._profile_store.async_save(self._profile.to_dict())
         if self._rooms:
             await self._rooms_store.async_save(self._rooms_state())
@@ -354,7 +366,29 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
         # reality. Frozen when heating is off or indoor temp is unavailable.
         hvac_mode = self._entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
         if hvac_mode == "heat" and indoor_temp is not None:
-            indoor_error = indoor_temp - target_temp  # positive = warm, negative = cold
+            now_utc = datetime.now(timezone.utc)
+            elapsed_h = (
+                min((now_utc - self._observer_last_ts).total_seconds() / 3600.0, 1.0)
+                if self._observer_last_ts is not None
+                else 0.0
+            )
+            # Measure the error from where the profile meant the room to be (pre-heat ahead of
+            # a known dip sits above target on purpose), so d_hat only reacts to surprises
+            self._expected_effect = advance_expected_effect(
+                self._expected_effect,
+                elapsed_h,
+                self._profile_supply_delta,
+                (
+                    self._profile.applied(dt_util.now().hour, self._profile_reduce_only())
+                    if self._profile_enabled
+                    else 0.0
+                ),
+                float(self._opt(CONF_RC_UA, DEFAULT_RC_UA)),
+                float(self._opt(CONF_RC_R, DEFAULT_RC_R)),
+                float(self._opt(CONF_RC_C, DEFAULT_RC_C)),
+            )
+            # positive = warmer than planned, negative = colder
+            indoor_error = indoor_temp - target_temp - self._expected_effect
             # Anti-windup: when the actuator can't go further in the direction d_hat would
             # push, freeze the update. Allows recovery once the error reverses.
             no_less_heat, no_more_heat = self._actuator_saturation(indoor_temp)
@@ -371,19 +405,16 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
                 and abs(trend) * horizon_h >= abs(indoor_error)
             )
             alpha = float(self._opt(CONF_DISTURBANCE_ALPHA, DEFAULT_DISTURBANCE_ALPHA))
-            now_utc = datetime.now(timezone.utc)
             if alpha < 1.0:
                 # Leak toward 0 (by elapsed time, also while the update is frozen) so a value
                 # learned under other conditions (a cold morning) can't linger into a sunny
                 # afternoon. Persistent bias belongs to the hour profile and refits.
-                if self._observer_last_ts is not None:
-                    elapsed_h = min((now_utc - self._observer_last_ts).total_seconds() / 3600.0, 1.0)
-                    self._d_hat *= math.exp(-elapsed_h / DISTURBANCE_LEAK_TAU_H)
+                self._d_hat *= math.exp(-elapsed_h / DISTURBANCE_LEAK_TAU_H)
                 if not saturated and not recovering:
                     # (1 - alpha) is the gain per outer tick; alpha = 1 freezes d_hat (no leak either)
                     self._d_hat += (1.0 - alpha) * (-indoor_error)
                 self._d_hat = self._clamp_d_hat(self._d_hat)
-                self._save_state()
+            self._save_state()
             self._observer_last_ts = now_utc
 
         # Solver targets (target + d_hat) so the house actually lands on target
@@ -466,6 +497,7 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             controller_action=controller_action,
             smhi_forecast=smhi_outdoor_forecast,
             disturbance_estimate=self._d_hat,
+            profile_expected_effect=self._expected_effect,
             setpoint_valid=self._has_valid_setpoint,
             hour_profile=list(self._profile.q),
             hour_profile_enabled=self._profile_enabled,
@@ -832,22 +864,26 @@ class OuterCoordinator(DataUpdateCoordinator[OuterData]):
             else None
         )
 
+        solve = dict(
+            t_in=t_in,
+            t_setpoint=target_temp,
+            outdoor_temps=model_outdoor,
+            solar_irradiance=model_solar,
+            R=R,
+            C=C,
+            UA=UA,
+            g=g,
+            supply_min=supply_min,
+            supply_max=supply_max,
+            prediction_supply=t_in if pump_off else None,
+            dt_hours=dt_hours,
+        )
+        self._profile_supply_delta = 0.0
         try:
-            setpoint, predicted = compute_supply_setpoint(
-                t_in=t_in,
-                t_setpoint=target_temp,
-                outdoor_temps=model_outdoor,
-                solar_irradiance=model_solar,
-                R=R,
-                C=C,
-                UA=UA,
-                g=g,
-                supply_min=supply_min,
-                supply_max=supply_max,
-                prediction_supply=t_in if pump_off else None,
-                dt_hours=dt_hours,
-                extra=extra,
-            )
+            setpoint, predicted = compute_supply_setpoint(**solve, extra=extra)
+            if extra is not None and not pump_off:
+                # The supply the profile added (or removed), for the observer's expected effect
+                self._profile_supply_delta = setpoint - compute_supply_setpoint(**solve)[0]
             self._last_supply_setpoint = setpoint
             self._has_valid_setpoint = True
             return setpoint, predicted

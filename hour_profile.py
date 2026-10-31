@@ -17,6 +17,7 @@ and night bias +0.10 → +0.01; β 0.1 learned too slowly, 0.35 overreacted.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -44,6 +45,24 @@ def reduce_only_hours(start: int, end: int) -> frozenset[int]:
 
 
 REDUCE_ONLY_HOURS = reduce_only_hours(DEFAULT_NO_PREHEAT_START, DEFAULT_NO_PREHEAT_END)
+
+
+def advance_expected_effect(
+    x: float, elapsed_h: float, supply_delta: float, q: float, ua: float, r_env: float, c: float
+) -> float:
+    """Step the profile's expected effect on indoor (°C) over elapsed_h, exactly for constant inputs.
+
+    x is how far the profile is expected to have moved the room from where it would be
+    without it: the slot itself (q, °C/h) plus the extra supply the MPC chose because of
+    the profile (supply_delta, °C). It relaxes like the room model, (UA + 1/R)/C per hour.
+    The observer subtracts it, so planned pre-heat (and planned dips) don't count as bias.
+    """
+    k = (ua + 1.0 / r_env) / c
+    if k <= 0 or elapsed_h <= 0:
+        return x
+    rate = ua * supply_delta / c + q
+    decay = math.exp(-k * elapsed_h)
+    return x * decay + rate / k * (1.0 - decay)
 
 
 @dataclass

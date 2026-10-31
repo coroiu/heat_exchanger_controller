@@ -210,6 +210,7 @@ class HourProfileSensor(_OuterSensor):
             "enabled": data.hour_profile_enabled,
             "updates": data.hour_profile_updates,
             "last_hour": data.hour_profile_last_hour,
+            "expected_effect": round(data.profile_expected_effect, 3),
             "last_residual": (
                 round(data.hour_profile_last_residual, 3)
                 if data.hour_profile_last_residual is not None
